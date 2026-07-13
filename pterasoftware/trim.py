@@ -36,7 +36,7 @@ from . import (
     unsteady_ring_vortex_lattice_method,
 )
 
-trim_logger = _logging.get_logger("trim")
+_logger = _logging.get_logger("trim")
 
 # Set a seed for reproducibility in the dual annealing optimizer.
 _seed = 42
@@ -229,6 +229,8 @@ def analyze_steady_trim(
     base_CgP1_E_Eo = problem.operating_point.CgP1_E_Eo
     base_surfaceNormal_E = problem.operating_point.surfaceNormal_E
     base_surfacePoint_E_Eo = problem.operating_point.surfacePoint_E_Eo
+    base_g_E = problem.operating_point.g_E
+    base_omegas_BP1__E = problem.operating_point.omegas_BP1__E
 
     def objective_function(arguments: np.ndarray) -> float:
         """Computes the trim objective function for a given set of OperatingPoint
@@ -265,6 +267,8 @@ def analyze_steady_trim(
             CgP1_E_Eo=base_CgP1_E_Eo,
             surfaceNormal_E=base_surfaceNormal_E,
             surfacePoint_E_Eo=base_surfacePoint_E_Eo,
+            g_E=base_g_E,
+            omegas_BP1__E=base_omegas_BP1__E,
         )
 
         qInf__E = trial_operating_point.qInf__E
@@ -327,26 +331,28 @@ def analyze_steady_trim(
 
         objective = (netForceCoefficient_W + netMomentCoefficient_W_CgP1) / 2
 
-        v_str = str(round(vCg__E, 2))
-        a_str = str(round(alpha, 2))
-        b_str = str(round(beta, 2))
-        f_str = str(round(externalFX_W, 2))
-        o_str = str(round(objective, 3))
+        v_str = f"{vCg__E:#.3G}"
+        a_str = f"{alpha:#.3G}"
+        b_str = f"{beta:#.3G}"
+        f_str = f"{externalFX_W:#.3G}"
+        o_str = f"{objective:#.3G}"
 
         state_msg = (
-            "\tState: vCg__E="
+            _logging.indent(1)
+            + "State: vCg__E = "
             + v_str
-            + ", alpha="
+            + " m/s, alpha = "
             + a_str
-            + ", beta="
+            + " deg, beta = "
             + b_str
-            + ", externalFX_W="
+            + " deg, externalFX_W = "
             + f_str
+            + " N"
         )
-        obj_msg = "\t\tObjective: " + o_str
+        obj_msg = _logging.indent(2) + "Objective: " + o_str
 
-        trim_logger.info(state_msg)
-        trim_logger.info(obj_msg)
+        _logger.info(state_msg)
+        _logger.info(obj_msg)
 
         if objective < objective_cut_off:
             raise StopIteration
@@ -366,7 +372,7 @@ def analyze_steady_trim(
         (boundsExternalFX_W[0], boundsExternalFX_W[1]),
     ]
 
-    trim_logger.info("Starting local search.")
+    _logger.info(_logging.indent() + "Starting local search")
     try:
         local_options: Any = {"maxfun": num_calls, "eps": 0.01}
         sp_opt.minimize(
@@ -377,7 +383,7 @@ def analyze_steady_trim(
             options=local_options,
         )
     except StopIteration:
-        trim_logger.info("Acceptable value reached with local search.")
+        _logger.info(_logging.indent() + "Acceptable value reached with local search")
         return (
             current_arguments[0],
             current_arguments[1],
@@ -385,8 +391,9 @@ def analyze_steady_trim(
             current_arguments[3],
         )
 
-    trim_logger.warning(
-        "No acceptable value reached with local search. Starting global search."
+    _logger.warning(
+        _logging.indent()
+        + "No acceptable value reached with local search, so starting global search"
     )
     try:
         global_options: Any = {"maxfun": num_calls, "eps": 0.01}
@@ -403,7 +410,7 @@ def analyze_steady_trim(
             seed=_seed,
         )
     except StopIteration:
-        trim_logger.info("Acceptable global minima found.")
+        _logger.info(_logging.indent() + "Acceptable global minima found")
         return (
             current_arguments[0],
             current_arguments[1],
@@ -411,9 +418,10 @@ def analyze_steady_trim(
             current_arguments[3],
         )
 
-    trim_logger.critical(
-        "No trim condition found. Try increasing the bounds and the maximum number of "
-        "iterations."
+    _logger.critical(
+        _logging.indent()
+        + "No trim condition found, so try increasing the bounds and the maximum "
+        "number of iterations"
     )
     return None, None, None, None
 
@@ -459,10 +467,12 @@ def analyze_unsteady_trim(
     cutoff value. If no trim condition is found within the maximum number of function
     calls, the function returns None values and logs a critical error.
 
-    :param problem: The UnsteadyProblem whose trim condition will be found. The
-        UnsteadyProblem's Movement must contain exactly one AirplaneMovement. The
-        problem's OperatingPointMovement's base OperatingPoint will be modified during
-        the trim search.
+    :param problem: The UnsteadyProblem whose trim condition will be found. This must be
+        a standard UnsteadyProblem, not a FreeFlightUnsteadyProblem or an
+        AeroelasticUnsteadyProblem, neither of which is supported. The UnsteadyProblem's
+        Movement must contain exactly one AirplaneMovement. The problem's
+        OperatingPointMovement's base OperatingPoint will be modified during the trim
+        search.
     :param boundsVCg__E: A tuple of two positive numbers (ints or floats), in ascending
         order, determining the range of base speeds of the Airplane's CG (in the Earth
         frame) to search. The base OperatingPoint's initial vCg__E must be within these
@@ -500,7 +510,10 @@ def analyze_unsteady_trim(
     """
     # Validate the problem parameter.
     if not isinstance(problem, problems.UnsteadyProblem):
-        raise TypeError("problem must be an UnsteadyProblem.")
+        raise TypeError(
+            "problem must be a standard UnsteadyProblem, not a "
+            "FreeFlightUnsteadyProblem or an AeroelasticUnsteadyProblem."
+        )
     if len(problem.movement.airplane_movements) != 1:
         raise ValueError(
             "The UnsteadyProblem's Movement must contain exactly one AirplaneMovement "
@@ -612,6 +625,8 @@ def analyze_unsteady_trim(
     base_CgP1_E_Eo = base_operating_point.CgP1_E_Eo
     base_surfaceNormal_E = base_operating_point.surfaceNormal_E
     base_surfacePoint_E_Eo = base_operating_point.surfacePoint_E_Eo
+    base_g_E = base_operating_point.g_E
+    base_omegas_BP1__E = base_operating_point.omegas_BP1__E
 
     def objective_function(arguments: np.ndarray) -> float:
         """Computes the trim objective function for a given set of OperatingPoint
@@ -648,6 +663,8 @@ def analyze_unsteady_trim(
             CgP1_E_Eo=base_CgP1_E_Eo,
             surfaceNormal_E=base_surfaceNormal_E,
             surfacePoint_E_Eo=base_surfacePoint_E_Eo,
+            g_E=base_g_E,
+            omegas_BP1__E=base_omegas_BP1__E,
         )
 
         qInf__E = trial_operating_point.qInf__E
@@ -706,26 +723,28 @@ def analyze_unsteady_trim(
 
         objective = (netForceCoefficients_W + netMomentCoefficients_W_Cg) / 2
 
-        v_str = str(round(vCg__E, 2))
-        a_str = str(round(alpha, 2))
-        b_str = str(round(beta, 2))
-        f_str = str(round(externalFX_W, 2))
-        o_str = str(round(objective, 3))
+        v_str = f"{vCg__E:#.3G}"
+        a_str = f"{alpha:#.3G}"
+        b_str = f"{beta:#.3G}"
+        f_str = f"{externalFX_W:#.3G}"
+        o_str = f"{objective:#.3G}"
 
         state_msg = (
-            "\tState: vCg__E="
+            _logging.indent(1)
+            + "State: vCg__E = "
             + v_str
-            + ", alpha="
+            + " m/s, alpha = "
             + a_str
-            + ", beta="
+            + " deg, beta = "
             + b_str
-            + ", externalFX_W="
+            + " deg, externalFX_W = "
             + f_str
+            + " N"
         )
-        obj_msg = "\t\tObjective: " + o_str
+        obj_msg = _logging.indent(2) + "Objective: " + o_str
 
-        trim_logger.info(state_msg)
-        trim_logger.info(obj_msg)
+        _logger.info(state_msg)
+        _logger.info(obj_msg)
 
         if objective < objective_cut_off:
             raise StopIteration
@@ -745,7 +764,7 @@ def analyze_unsteady_trim(
         (boundsExternalFX_W[0], boundsExternalFX_W[1]),
     ]
 
-    trim_logger.info("Starting local search.")
+    _logger.info(_logging.indent() + "Starting local search")
     try:
         local_options: Any = {"maxfun": num_calls, "eps": 0.01}
         sp_opt.minimize(
@@ -756,7 +775,7 @@ def analyze_unsteady_trim(
             options=local_options,
         )
     except StopIteration:
-        trim_logger.info("Acceptable value reached with local search.")
+        _logger.info(_logging.indent() + "Acceptable value reached with local search")
         return (
             current_arguments[0],
             current_arguments[1],
@@ -764,8 +783,9 @@ def analyze_unsteady_trim(
             current_arguments[3],
         )
 
-    trim_logger.warning(
-        "No acceptable value reached with local search. Starting global search."
+    _logger.warning(
+        _logging.indent()
+        + "No acceptable value reached with local search, so starting global search"
     )
     try:
         global_options: Any = {"maxfun": num_calls, "eps": 0.01}
@@ -782,7 +802,7 @@ def analyze_unsteady_trim(
             seed=_seed,
         )
     except StopIteration:
-        trim_logger.info("Acceptable global minima found.")
+        _logger.info(_logging.indent() + "Acceptable global minima found")
         return (
             current_arguments[0],
             current_arguments[1],
@@ -790,8 +810,9 @@ def analyze_unsteady_trim(
             current_arguments[3],
         )
 
-    trim_logger.critical(
-        "No trim condition found. Try increasing the bounds and the maximum number of "
-        "iterations."
+    _logger.critical(
+        _logging.indent()
+        + "No trim condition found, so try increasing the bounds and the maximum "
+        "number of iterations"
     )
     return None, None, None, None

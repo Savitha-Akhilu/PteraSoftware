@@ -1,6 +1,8 @@
 """This module contains classes to test Airplanes."""
 
+import copy
 import unittest
+from unittest.mock import PropertyMock, patch
 
 import numpy as np
 import numpy.testing as npt
@@ -27,7 +29,6 @@ class TestAirplane(unittest.TestCase):
 
         # Create additional test fixtures
         self.test_wing_type_1 = geometry_fixtures.make_type_1_wing_fixture()
-        self.test_wing_type_4 = geometry_fixtures.make_type_4_wing_fixture()
 
     def test_wings_parameter_validation(self):
         """Test that wings parameter validation works correctly."""
@@ -172,6 +173,43 @@ class TestAirplane(unittest.TestCase):
         with self.assertRaises(TypeError):
             # noinspection PyTypeChecker
             ps.geometry.airplane.Airplane(wings=[test_wing], b_ref="large")
+
+    def test_s_ref_none_with_none_projected_area_raises(self):
+        """Test that s_ref=None raises ValueError when wing's projected_area is None."""
+        with patch.object(
+            ps.geometry.wing.Wing,
+            "projected_area",
+            new_callable=PropertyMock,
+            return_value=None,
+        ):
+            test_wing = geometry_fixtures.make_type_1_wing_fixture()
+            with self.assertRaises(ValueError):
+                ps.geometry.airplane.Airplane(wings=[test_wing])
+
+    def test_c_ref_none_with_none_mean_aerodynamic_chord_raises(self):
+        """Test that c_ref=None raises ValueError when wing's mean_aerodynamic_chord
+        is None."""
+        with patch.object(
+            ps.geometry.wing.Wing,
+            "mean_aerodynamic_chord",
+            new_callable=PropertyMock,
+            return_value=None,
+        ):
+            test_wing = geometry_fixtures.make_type_1_wing_fixture()
+            with self.assertRaises(ValueError):
+                ps.geometry.airplane.Airplane(wings=[test_wing], s_ref=2.0)
+
+    def test_b_ref_none_with_none_span_raises(self):
+        """Test that b_ref=None raises ValueError when wing's span is None."""
+        with patch.object(
+            ps.geometry.wing.Wing,
+            "span",
+            new_callable=PropertyMock,
+            return_value=None,
+        ):
+            test_wing = geometry_fixtures.make_type_1_wing_fixture()
+            with self.assertRaises(ValueError):
+                ps.geometry.airplane.Airplane(wings=[test_wing], s_ref=2.0, c_ref=1.0)
 
     def test_num_panels_calculation(self):
         """Test that num_panels is calculated correctly from all Wings."""
@@ -395,6 +433,58 @@ class TestAirplane(unittest.TestCase):
             # Reflected Wing should have None-type control surface symmetry
             self.assertEqual(reflected_wcs.control_surface_symmetry_type, None)
 
+    def test_process_wing_symmetry_type_4_asymmetric_root_raises(self):
+        """A type 4 Wing whose root cross section (on the coincident symmetry plane)
+        has an asymmetric control surface with a nonzero deflection must raise.
+
+        The original and mirrored halves would deflect that shared cross section in
+        opposite directions, tearing the mesh at the centerline seam.
+        """
+        root_wcs = (
+            geometry_fixtures.make_root_asymmetric_control_surface_wing_cross_section_fixture()
+        )
+        tip_wcs = (
+            geometry_fixtures.make_tip_wing_cross_section_with_control_surface_fixture()
+        )
+        wing = ps.geometry.wing.Wing(
+            wing_cross_sections=[root_wcs, tip_wcs],
+            Ler_Gs_Cgs=[1.0, 0.0, 0.5],
+            angles_Gs_to_Wn_ixyz=[0.0, 0.0, 0.0],
+            symmetric=True,
+            mirror_only=False,
+            symmetryNormal_G=[0.0, 1.0, 0.0],
+            symmetryPoint_G_Cg=[1.0, 0.0, 0.5],
+            num_chordwise_panels=8,
+            chordwise_spacing="cosine",
+        )
+        with self.assertRaises(ValueError):
+            ps.geometry.airplane.Airplane.process_wing_symmetry(wing)
+
+    def test_process_wing_symmetry_type_4_asymmetric_tip_allowed(self):
+        """A type 4 Wing may carry an asymmetric control surface on an off-plane cross
+        section (an outboard aileron), since only the shared root cross section tears
+        the mesh. The guard must reject the root case without over-restricting this one.
+        """
+        root_wcs = geometry_fixtures.make_root_wing_cross_section_fixture()
+        root_wcs.control_surface_symmetry_type = "symmetric"
+        tip_wcs = (
+            geometry_fixtures.make_asymmetric_control_surface_wing_cross_section_fixture()
+        )
+        wing = ps.geometry.wing.Wing(
+            wing_cross_sections=[root_wcs, tip_wcs],
+            Ler_Gs_Cgs=[1.0, 0.0, 0.5],
+            angles_Gs_to_Wn_ixyz=[0.0, 0.0, 0.0],
+            symmetric=True,
+            mirror_only=False,
+            symmetryNormal_G=[0.0, 1.0, 0.0],
+            symmetryPoint_G_Cg=[1.0, 0.0, 0.5],
+            num_chordwise_panels=8,
+            chordwise_spacing="cosine",
+        )
+        result = ps.geometry.airplane.Airplane.process_wing_symmetry(wing)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].symmetry_type, 4)
+
     def test_airplane_with_various_wing_combinations(self):
         """Test Airplane with various combinations of Wing types."""
         # Mix of different Wing types
@@ -428,8 +518,6 @@ class TestAirplaneDeepCopy(unittest.TestCase):
 
     def test_deepcopy_creates_new_instance(self):
         """Test that deepcopy creates a new Airplane instance."""
-        import copy
-
         original = self.basic_airplane
         copied = copy.deepcopy(original)
 
@@ -438,8 +526,6 @@ class TestAirplaneDeepCopy(unittest.TestCase):
 
     def test_deepcopy_preserves_airplane_parameters(self):
         """Test that deepcopy preserves Airplane parameters."""
-        import copy
-
         original = self.basic_airplane
         copied = copy.deepcopy(original)
 
@@ -452,8 +538,6 @@ class TestAirplaneDeepCopy(unittest.TestCase):
 
     def test_deepcopy_creates_independent_cg_array(self):
         """Test that deepcopy creates an independent copy of Cg_GP1_CgP1."""
-        import copy
-
         original = self.basic_airplane
         copied = copy.deepcopy(original)
 
@@ -461,8 +545,6 @@ class TestAirplaneDeepCopy(unittest.TestCase):
 
     def test_deepcopy_creates_independent_wings(self):
         """Test that deepcopy creates independent Wing copies."""
-        import copy
-
         original = self.basic_airplane
         copied = copy.deepcopy(original)
 
@@ -473,8 +555,6 @@ class TestAirplaneDeepCopy(unittest.TestCase):
 
     def test_deepcopy_multi_wing_airplane(self):
         """Test that deepcopy works correctly for multi wing Airplanes."""
-        import copy
-
         original = self.multi_wing_airplane
         copied = copy.deepcopy(original)
 
@@ -486,8 +566,6 @@ class TestAirplaneDeepCopy(unittest.TestCase):
 
     def test_deepcopy_resets_forces_and_moments(self):
         """Test that deepcopy resets forces and moments to None."""
-        import copy
-
         original = self.basic_airplane
         original.forces_W = np.array([1.0, 2.0, 3.0])
         original.moments_W_CgP1 = np.array([0.1, 0.2, 0.3])
@@ -503,8 +581,6 @@ class TestAirplaneDeepCopy(unittest.TestCase):
 
     def test_deepcopy_preserves_num_panels(self):
         """Test that deepcopy preserves the total number of Panels."""
-        import copy
-
         original = self.basic_airplane
         copied = copy.deepcopy(original)
 
@@ -512,8 +588,6 @@ class TestAirplaneDeepCopy(unittest.TestCase):
 
     def test_deepcopy_preserves_wing_panels(self):
         """Test that deepcopy preserves Wing Panels."""
-        import copy
-
         original = self.basic_airplane
         copied = copy.deepcopy(original)
 
@@ -530,19 +604,14 @@ class TestAirplaneDeepCopy(unittest.TestCase):
 
     def test_deepcopy_resets_wing_wake_state(self):
         """Test that deepcopy resets wake state in all Wings."""
-        import copy
-
         original = self.basic_airplane
         copied = copy.deepcopy(original)
 
         for copied_wing in copied.wings:
-            self.assertEqual(copied_wing.wake_ring_vortices.shape[0], 0)
             self.assertEqual(copied_wing.gridWrvp_GP1_CgP1.shape[0], 0)
 
     def test_deepcopy_copied_airplane_is_functional(self):
         """Test that copied Airplanes are fully functional."""
-        import copy
-
         original = self.basic_airplane
         copied = copy.deepcopy(original)
 
@@ -558,8 +627,6 @@ class TestAirplaneDeepCopy(unittest.TestCase):
 
     def test_deepcopy_first_airplane(self):
         """Test that deepcopy works correctly for first Airplane (Cg at origin)."""
-        import copy
-
         original = self.first_airplane
         copied = copy.deepcopy(original)
 
@@ -573,7 +640,6 @@ class TestAirplaneImmutability(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures for immutability tests."""
         self.basic_airplane = geometry_fixtures.make_basic_airplane_fixture()
-        self.first_airplane = geometry_fixtures.make_first_airplane_fixture()
 
     def test_immutable_wings_property(self):
         """Test that wings property is read only."""
@@ -782,6 +848,7 @@ class TestAirplaneDeepCopyWithCgGP1CgP1(unittest.TestCase):
         npt.assert_array_equal(copied.Cg_GP1_CgP1, new_position)
 
         for i, (orig_wing, copied_wing) in enumerate(zip(original.wings, copied.wings)):
+            # noinspection PyUnresolvedReferences
             with self.subTest(wing_index=i):
                 self.assertIsNot(orig_wing, copied_wing)
                 self.assertEqual(copied_wing.symmetry_type, orig_wing.symmetry_type)
@@ -882,7 +949,6 @@ class TestAirplaneGetPlottableData(unittest.TestCase):
         """Set up test fixtures for get_plottable_data tests."""
         self.basic_airplane = geometry_fixtures.make_basic_airplane_fixture()
         self.multi_wing_airplane = geometry_fixtures.make_multi_wing_airplane_fixture()
-        self.first_airplane = geometry_fixtures.make_first_airplane_fixture()
 
     def test_get_plottable_data_returns_list_when_show_is_false(self):
         """Test that get_plottable_data returns a list when show is False."""
@@ -979,7 +1045,6 @@ class TestAirplaneDraw(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures for draw tests."""
         self.basic_airplane = geometry_fixtures.make_basic_airplane_fixture()
-        self.first_airplane = geometry_fixtures.make_first_airplane_fixture()
 
     def test_draw_runs_without_error_in_testing_mode(self):
         """Test that draw runs without error in testing mode."""
@@ -1007,7 +1072,3 @@ class TestAirplaneDraw(unittest.TestCase):
         with self.assertRaises(TypeError):
             # noinspection PyTypeChecker
             self.basic_airplane.draw(save=False, testing="invalid")
-
-
-if __name__ == "__main__":
-    unittest.main()

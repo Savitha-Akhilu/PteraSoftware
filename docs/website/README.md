@@ -5,7 +5,9 @@
 :hidden:
 
 self
+examples
 api
+performance
 ```
 
 ```{toctree}
@@ -29,6 +31,8 @@ LICENSE
 
 AXES_POINTS_AND_FRAMES
 ANGLE_VECTORS_AND_TRANSFORMATIONS
+MUJOCO_CONVENTIONS
+STRONG_COUPLING
 CLASSES_AND_IMMUTABILITY
 ```
 

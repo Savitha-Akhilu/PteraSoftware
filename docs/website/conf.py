@@ -1,5 +1,27 @@
 import os
+import re
+import sys
 from datetime import datetime
+from pathlib import Path
+
+# Add project root to sys.path so sphinx.ext.autodoc can import pterasoftware.
+sys.path.insert(0, os.path.abspath(os.path.join("..", "..")))
+
+# Mock all runtime dependencies so autodoc can import pterasoftware (via the
+# autofunction directives for save, load, and set_up_logging) without them
+# installed. This is safe because the documented functions only use stdlib
+# types in their signatures.
+autodoc_mock_imports = [
+    "cmocean",
+    "matplotlib",
+    "mujoco",
+    "numba",
+    "numpy",
+    "pyvista",
+    "scipy",
+    "tqdm",
+    "webp",
+]
 
 # -- Project information -----------------------------------------------------
 
@@ -14,21 +36,77 @@ copyright = f"{current_year}, {author}"
 extensions = [
     "myst_parser",
     "autoapi.extension",
+    "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
-    "sphinx.ext.viewcode",
     "sphinx.ext.intersphinx",
     "sphinx.ext.autosectionlabel",
     "sphinx.ext.mathjax",
     "sphinx_copybutton",
+    "sphinx_design",
 ]
 
 myst_enable_extensions = [
     "colon_fence",
     "deflist",
+    "dollarmath",
     "substitution",
     "tasklist",
 ]
 myst_heading_anchors = 3
+
+
+def _load_benchmark_host_info() -> dict[str, str]:
+    """Read docs/_static/benchmarks/host.json into MyST substitutions.
+
+    The benchmark publish workflow at PteraSoftwareBenchmarks drops host.json
+    alongside the chart artifacts under docs/_static/benchmarks/. Fallback
+    strings are returned when the file is absent (fresh checkout before the
+    first benchmark publish has landed) so docs/website/performance.md still
+    builds.
+    """
+    import json
+
+    path = Path(__file__).parent.parent / "_static" / "benchmarks" / "host.json"
+    fallback = {
+        "host_os": "Pending first benchmark publish",
+        "host_cpu": "Pending first benchmark publish",
+        "host_cores": "n/a",
+        "host_governor": "n/a",
+        "host_memory_mb": "n/a",
+        "host_swappiness": "n/a",
+        "host_thp": "n/a",
+        "host_gpu": "Pending first benchmark publish",
+        "host_gpu_driver": "n/a",
+        "host_cuda": "n/a",
+        "host_storage": "Pending first benchmark publish",
+    }
+    if not path.exists():
+        return fallback
+    payload = json.loads(path.read_text())
+    os_info = payload.get("os", {})
+    cpu = payload.get("cpu", {})
+    memory = payload.get("memory", {})
+    gpu = payload.get("gpu", {})
+    storage = payload.get("storage", {})
+    os_label = (
+        f"{os_info.get('name', '')} {os_info.get('version', '')}".strip() or "unknown"
+    )
+    return {
+        "host_os": os_label,
+        "host_cpu": cpu.get("model", "unknown"),
+        "host_cores": str(cpu.get("logical_cores", "unknown")),
+        "host_governor": cpu.get("governor", "unknown"),
+        "host_memory_mb": str(memory.get("total_mb", "unknown")),
+        "host_swappiness": str(memory.get("swappiness", "unknown")),
+        "host_thp": memory.get("transparent_hugepages", "unknown"),
+        "host_gpu": gpu.get("model", "unknown"),
+        "host_gpu_driver": gpu.get("driver_version", "unknown"),
+        "host_cuda": gpu.get("cuda_version", "unknown"),
+        "host_storage": storage.get("model", "unknown"),
+    }
+
+
+myst_substitutions = _load_benchmark_host_info()
 
 # Suppress warnings that are informational or unavoidable
 suppress_warnings = [
@@ -37,6 +115,23 @@ suppress_warnings = [
 ]
 
 autosectionlabel_prefix_document = True
+
+# Render every Python signature with one parameter per line. Any signature
+# longer than this threshold (in characters) wraps so that each parameter sits
+# on its own indented line with a trailing comma and the closing parenthesis on
+# its own line. A threshold of one forces this multi-line layout for every
+# signature that takes at least one parameter, which keeps long class and
+# function parameter lists readable instead of running together on one line.
+python_maximum_signature_line_length = 1
+
+# AutoAPI renders docstrings as reStructuredText, where a vector magnitude written
+# with bars (for example, "|g_E|") parses as a substitution reference. Define those
+# tokens so the reference resolves to the literal barred text instead of emitting an
+# "Undefined substitution referenced" build error, without annotating the docstrings
+# themselves.
+rst_prolog = r"""
+.. |g_E| replace:: \|g_E\|
+"""
 
 # Use README as the landing page (instead of index)
 root_doc = "README"
@@ -61,6 +156,8 @@ exclude_patterns = [
     "../AXES_POINTS_AND_FRAMES.md",
     "../CLASSES_AND_IMMUTABILITY.md",
     "../CODE_STYLE.md",
+    "../MUJOCO_CONVENTIONS.md",
+    "../STRONG_COUPLING.md",
     "../TYPE_HINT_AND_DOCSTRING_STYLE.md",
     "../WRITING_STYLE.md",
     # Exclude brand files directory
@@ -83,7 +180,11 @@ napoleon_attr_annotations = True
 html_theme = "furo"
 html_title = "PteraSoftware"
 html_favicon = "favicon/favicon.ico"
-html_static_path = ["_static", "Black_Text_Logo.png", "Logo.png"]
+# Drop the "View this page" source link (and the _sources/*.txt dump it points
+# to) so no page exposes a link to its underlying source.
+html_show_sourcelink = False
+html_copy_source = False
+html_static_path = ["_static", "../_static", "Black_Text_Logo.png", "Logo.png"]
 # Optionally also copy to site root (may be ignored by some builders)
 html_extra_path = ["favicon"]
 
@@ -97,11 +198,7 @@ html_js_files = [
     "custom.js",
 ]
 
-# Furo: enable "Edit this page" with GitHub
 html_theme_options = {
-    "source_repository": "https://github.com/camUrban/PteraSoftware/",
-    "source_branch": "main",
-    "source_directory": "docs/website/",
     # Use black text logo in light mode (better contrast), normal logo in dark mode
     "light_logo": "Black_Text_Logo.png",
     "dark_logo": "Logo.png",
@@ -109,47 +206,29 @@ html_theme_options = {
     "sidebar_hide_name": True,
 }
 
-# For AutoAPI-generated pages, the default "Edit this page" points to a
-# generated .rst path that doesn't exist in the repo. Override the URL to
-# point to the corresponding Python source file in GitHub.
-from pathlib import Path
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _repo_rel_for_autoapi_page(pagename: str) -> str | None:
-    """Return a repo-relative path for an AutoAPI page's corresponding source file."""
-    if not pagename.startswith("api/"):
-        return None
-    rel = pagename[len("api/") :]
-    if rel.endswith("/index"):
-        rel = rel[: -len("/index")]
-    py_path = REPO_ROOT / (rel.replace("/", os.sep) + ".py")
-    if py_path.exists():
-        target = py_path
-    else:
-        init_path = REPO_ROOT / rel.replace("/", os.sep) / "__init__.py"
-        if init_path.exists():
-            target = init_path
-        else:
-            return None
-    return target.relative_to(REPO_ROOT).as_posix()
+def _rewrite_repo_root_links(app, docname, source):
+    """Rewrite relative links in files included from the repo root.
 
-
-# noinspection PyUnusedLocal
-def _html_page_context(app, pagename, templatename, context, doctree):
-    repo_rel = _repo_rel_for_autoapi_page(pagename)
-    if repo_rel:
-        context["theme_source_edit_link"] = (
-            f"https://github.com/camUrban/PteraSoftware/edit/main/{repo_rel}"
-        )
-        context["theme_source_view_link"] = (
-            f"https://github.com/camUrban/PteraSoftware/blob/main/{repo_rel}?plain=true"
-        )
+    Files like CONTRIBUTING.md live at the repo root and use paths like
+    ``docs/CODE_STYLE.md`` which are correct on GitHub. When Sphinx
+    includes them via ``{include}``, those paths are resolved relative to
+    ``docs/website/`` where the wrapper lives, so ``docs/CODE_STYLE.md``
+    cannot be found. This handler replaces the wrapper's ``{include}``
+    directive with the actual file content, rewriting ``docs/*.md`` paths
+    to ``*.md`` so they resolve correctly in the Sphinx build.
+    """
+    contributing_path = REPO_ROOT / "CONTRIBUTING.md"
+    if docname == "CONTRIBUTING" and contributing_path.exists():
+        text = contributing_path.read_text()
+        text = re.sub(r"\(docs/([A-Z_]+\.md)\)", r"(\1)", text)
+        source[0] = text
 
 
 def setup(app):
-    app.connect("html-page-context", _html_page_context)
+    app.connect("source-read", _rewrite_repo_root_links)
 
     # Copy extra assets to the site root after build
     # noinspection PyShadowingNames
@@ -213,6 +292,7 @@ autoapi_options = [
     "members",
     "show-module-summary",
     "show-inheritance",
+    "inherited-members",
 ]
 autoapi_template_dir = "_autoapi_templates"
 
@@ -264,8 +344,6 @@ def _first_sentence(docstring: str) -> str:
     # Join into one string
     text = " ".join(paragraph_lines)
     # Find the first sentence (ends with period followed by space or end)
-    import re
-
     match = re.match(r"^(.*?\.)\s", text + " ")
     if match:
         return match.group(1)

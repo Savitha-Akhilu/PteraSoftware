@@ -105,8 +105,9 @@ class TestLogResults(unittest.TestCase):
 
         # Verify Reynolds number is in the output.
         self.assertIn("Reynolds Number:", output)
-        # Verify scientific notation format (e.g., "1.23e+05" or "1.23e+06").
-        self.assertRegex(output, r"Reynolds Number:\s+\d+\.\d{2}e[+-]\d{2}")
+        # Verify scientific notation format with three significant figures (e.g.,
+        # "1.23E+05" or "1.20E+06"; the alternate form keeps trailing zeros).
+        self.assertRegex(output, r"Reynolds Number:\s+\d\.\d{2}E[+-]\d{2}")
 
     def test_log_results_steady_solver_runs_without_error(self):
         """Test that log_results() runs without error for steady solver.
@@ -195,3 +196,136 @@ class TestOutputSurfaceEffect(unittest.TestCase):
             save=False,
             testing=True,
         )
+
+
+class TestFreeFlightOutput(unittest.TestCase):
+    """This is a class with functions to test the output module's free flight
+    visualization, which renders each time step's geometry in Earth axes so the body
+    flies through the scene."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Set up test fixtures once for all tests in this class.
+
+        :return: None
+        """
+        cls.free_flight_solver = solver_fixtures.make_simple_glider_free_flight_solver()
+        cls.free_flight_solver.run(show_progress=False)
+
+    def test_draw_does_not_throw(self):
+        """This method tests that the draw function does not throw any errors for a
+        free flight solver.
+
+        :return: None
+        """
+        ps.output.draw(
+            solver=self.free_flight_solver,
+            scalar_type=None,
+            show_wake_vortices=False,
+            show_streamlines=False,
+            testing=True,
+        )
+
+    def test_draw_with_wake_vortices_does_not_throw(self):
+        """This method tests that the draw function does not throw any errors for a
+        free flight solver when wake vortices are shown.
+
+        :return: None
+        """
+        ps.output.draw(
+            solver=self.free_flight_solver,
+            scalar_type=None,
+            show_wake_vortices=True,
+            show_streamlines=False,
+            testing=True,
+        )
+
+    def test_animate_does_not_throw(self):
+        """This method tests that the animate function does not throw any errors for a
+        free flight solver.
+
+        :return: None
+        """
+        ps.output.animate(
+            unsteady_solver=self.free_flight_solver,
+            scalar_type=None,
+            show_wake_vortices=False,
+            save=False,
+            testing=True,
+        )
+
+    def test_animate_with_wake_vortices_does_not_throw(self):
+        """This method tests that the animate function does not throw any errors for a
+        free flight solver when wake vortices are shown.
+
+        :return: None
+        """
+        ps.output.animate(
+            unsteady_solver=self.free_flight_solver,
+            scalar_type=None,
+            show_wake_vortices=True,
+            save=False,
+            testing=True,
+        )
+
+    def test_plot_results_versus_time_does_not_throw(self):
+        """This method tests that the plot_results_versus_time function does not throw
+        any errors for a free flight solver, which exercises the state-history plots.
+
+        :return: None
+        """
+        ps.output.plot_results_versus_time(
+            unsteady_solver=self.free_flight_solver, show=False
+        )
+
+    def test_log_results_logs_state_history(self):
+        """This method tests that log_results logs the first Airplane's initial and
+        final six-degree-of-freedom state for a free flight solver.
+
+        :return: None
+        """
+        with self.assertLogs("pterasoftware.output", level=logging.INFO) as log:
+            ps.output.log_results(solver=self.free_flight_solver)
+
+        output = "\n".join(log.output)
+
+        self.assertIn("The First Airplane's Free Flight State History:", output)
+        self.assertIn("Initial State", output)
+        self.assertIn("Final State", output)
+        self.assertIn(
+            "Position (of the First Airplane's CG, in Earth Axes, Relative to the "
+            "Earth Origin):",
+            output,
+        )
+        self.assertIn(
+            "Orientation (of the First Airplane's Body Axes Relative to Earth Axes, "
+            "Intrinsic zy'x\" Sequence):",
+            output,
+        )
+        self.assertIn(
+            "Velocity (of the First Airplane's CG, in Earth Axes, Observed from the "
+            "Earth Frame):",
+            output,
+        )
+        self.assertIn(
+            "Angular Velocity (in the First Airplane's Body Axes, Observed from the "
+            "Earth Frame):",
+            output,
+        )
+        self.assertIn("Angle of Attack (alpha):", output)
+        self.assertIn("Sideslip Angle (beta):", output)
+
+        # Each vector state quantity is broken into one row per component, labeled with
+        # its variable-convention name.
+        self.assertIn("cgP1X_E_Eo:", output)
+        self.assertIn("cgP1Y_E_Eo:", output)
+        self.assertIn("cgP1Z_E_Eo:", output)
+        self.assertIn("angleX_E_to_BP1_izyx:", output)
+        self.assertIn("angleY_E_to_BP1_izyx:", output)
+        self.assertIn("angleZ_E_to_BP1_izyx:", output)
+        self.assertIn("vCgP1X_E__E:", output)
+        self.assertIn("vCgP1Y_E__E:", output)
+        self.assertIn("vCgP1Z_E__E:", output)
+        self.assertIn("omegaX_BP1__E:", output)
+        self.assertIn("omegaY_BP1__E:", output)
+        self.assertIn("omegaZ_BP1__E:", output)

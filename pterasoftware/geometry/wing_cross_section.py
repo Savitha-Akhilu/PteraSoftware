@@ -162,8 +162,10 @@ class WingCrossSection:
             flaps). With "asymmetric", mirrored control surfaces have opposite
             deflections (like ailerons). The default is None. For Wings with type 4 or 5
             symmetry, this parameter must be specified. For Wings with type 1, 2, or 3
-            symmetry, this parameter must be None. This validation is performed by the
-            parent Airplane during Wing processing.
+            symmetry, this parameter must be None. The root WingCrossSection of a type 4
+            Wing cannot be "asymmetric" with a nonzero deflection, since the mirrored
+            halves would tear the mesh at the shared centerline. This validation is
+            performed by the parent Airplane during Wing processing.
         :param control_surface_hinge_point: The location of the control surface hinge
             from the leading edge as a fraction of chord. It must be a float in the
             range (0.0, 1.0). The default is 0.75.
@@ -173,7 +175,10 @@ class WingCrossSection:
             is 0.0 degrees.
         :param spanwise_spacing: For non tip WingCrossSections, this can be "cosine" or
             "uniform". I highly recommend using cosine spacing. For tip
-            WingCrossSections it must be None.
+            WingCrossSections it must be None. If the parent Wing has
+            explode_into_strips=True, every non tip WingCrossSection must use "uniform"
+            because the explosion distributes parent-relative offsets and twists
+            uniformly across each WingCrossSection's intermediates.
         :return: None
         """
         # Validate airfoil (immutable).
@@ -548,10 +553,10 @@ class WingCrossSection:
         )
 
         airfoilOutline_Wcs_lp = _transformations.apply_T_to_vectors(
-            airfoilScalingMatrix, airfoilNonScaledOutline_Wcs_lp, has_point=True
+            airfoilScalingMatrix, airfoilNonScaledOutline_Wcs_lp, is_position=True
         )
         airfoilMcl_Wcs_lp = _transformations.apply_T_to_vectors(
-            airfoilScalingMatrix, airfoilNonScaledMcl_Wcs_lp, has_point=True
+            airfoilScalingMatrix, airfoilNonScaledMcl_Wcs_lp, is_position=True
         )
 
         if not show:
@@ -563,22 +568,22 @@ class WingCrossSection:
         assert _T_pas_Wcs_Lp_to_Wcsp_Lpp is not None
 
         airfoilOutline_Wcsp_lpp = _transformations.apply_T_to_vectors(
-            _T_pas_Wcs_Lp_to_Wcsp_Lpp, airfoilOutline_Wcs_lp, has_point=True
+            _T_pas_Wcs_Lp_to_Wcsp_Lpp, airfoilOutline_Wcs_lp, is_position=True
         )
         airfoilMcl_Wcsp_lpp = _transformations.apply_T_to_vectors(
-            _T_pas_Wcs_Lp_to_Wcsp_Lpp, airfoilMcl_Wcs_lp, has_point=True
+            _T_pas_Wcs_Lp_to_Wcsp_Lpp, airfoilMcl_Wcs_lp, is_position=True
         )
 
         if self.symmetry_type in (2, 3):
             UserMatrixAxesWcspLpp = _transformations.generate_reflect_T(
-                (0, 0, 0), (0, 1, 0), passive=False
+                np.array([0.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]), passive=False
             )
 
             airfoilOutline_WcspReflectY_lpp = _transformations.apply_T_to_vectors(
-                UserMatrixAxesWcspLpp, airfoilOutline_Wcsp_lpp, has_point=True
+                UserMatrixAxesWcspLpp, airfoilOutline_Wcsp_lpp, is_position=True
             )
             airfoilMcl_WcspReflectY_lpp = _transformations.apply_T_to_vectors(
-                UserMatrixAxesWcspLpp, airfoilMcl_Wcsp_lpp, has_point=True
+                UserMatrixAxesWcspLpp, airfoilMcl_Wcsp_lpp, is_position=True
             )
 
         else:
@@ -642,7 +647,7 @@ class WingCrossSection:
                 tip_length=(0.2, 0.2, 0.2),
                 symmetric_bounds=False,
             )
-            plotter.add_actor(AxesWcsLpWcspLpp_Wcsp_lpp)  # type: ignore[arg-type]
+            plotter.add_actor(AxesWcsLpWcspLpp_Wcsp_lpp)
         else:
             AxesWcsLp_Wcsp_lpp = pv.AxesAssembly(
                 x_label="WcsX@Lp",
@@ -697,8 +702,8 @@ class WingCrossSection:
                 tip_length=(0.2, 0.2, 0.2),
                 symmetric_bounds=False,
             )
-            plotter.add_actor(AxesWcsLp_Wcsp_lpp)  # type: ignore[arg-type]
-            plotter.add_actor(AxesWcspLpp)  # type: ignore[arg-type]
+            plotter.add_actor(AxesWcsLp_Wcsp_lpp)
+            plotter.add_actor(AxesWcspLpp)
 
         plotter.enable_parallel_projection()  # type: ignore[call-arg]
 

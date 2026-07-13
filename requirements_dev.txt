@@ -2,10 +2,10 @@ black
 build
 codecov
 codespell
+coverage
 docformatter
 isort
 mypy
 pre-commit
-PyInstaller
 scipy-stubs
 twine

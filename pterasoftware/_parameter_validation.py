@@ -383,9 +383,9 @@ def threeD_number_vectorLike_return_float_unit_vector(
 
 
 def threeD_spacing_vectorLike_return_tuple(value: Any, name: str) -> tuple[
-    str | Callable[[np.ndarray], np.ndarray],
-    str | Callable[[np.ndarray], np.ndarray],
-    str | Callable[[np.ndarray], np.ndarray],
+    str | Callable[[float], float],
+    str | Callable[[float], float],
+    str | Callable[[float], float],
 ]:
     """Validates a value is a 3D vector-like object (array-like object with shape (3,))
     of spacing specifications, and then returns it as a tuple of 3 spacing
@@ -430,9 +430,9 @@ def threeD_spacing_vectorLike_return_tuple(value: Any, name: str) -> tuple[
     validated_value = tuple(validated_list)
     return cast(
         tuple[
-            str | Callable[[np.ndarray], np.ndarray],
-            str | Callable[[np.ndarray], np.ndarray],
-            str | Callable[[np.ndarray], np.ndarray],
+            str | Callable[[float], float],
+            str | Callable[[float], float],
+            str | Callable[[float], float],
         ],
         validated_value,
     )
@@ -464,8 +464,9 @@ def nD_number_vectorLike_return_float(value: Any, name: str) -> np.ndarray:
 
 
 def fourByFour_number_arrayLike_return_float(value: Any, name: str) -> np.ndarray:
-    """Validates a value is a (4,4) array-like object. It then returns it as a (4,4)
-    ndarray of floats.
+    """Validates a value is a (4,4) array-like object.
+
+    It then returns it as a (4,4) ndarray of floats.
 
     np.nan, np.inf, and -np.inf aren't valid values.
 
@@ -523,3 +524,35 @@ def rotation_order_return_str(value: Any, name: str) -> str:
         raise ValueError(f"{name} must be one of {valid_orders}.")
 
     return value
+
+
+def m_by_n_number_arrayLike_return_float(
+    value: Any, name: str, m: int, n: int
+) -> np.ndarray:
+    """Validates a value is a (m,n) array-like object of ints or floats.
+
+    It then returns it as a (m,n) ndarray of floats.
+
+    np.nan, np.inf, and -np.inf aren't valid values.
+
+    :param value: The value to validate.
+    :param name: The name of the value.
+    :param m: The desired number of rows. It must be a positive int.
+    :param n: The desired number of columns. It must be a positive int.
+    :return: The validated value as a (m,n) ndarray of floats.
+    """
+    try:
+        validated_matrix = np.array(value, dtype=float, copy=True)
+    except (TypeError, ValueError):
+        raise TypeError(f"{name} must be array-like and contain ints or floats.")
+
+    if validated_matrix.shape != (m, n):
+        raise ValueError(
+            f"{name} has shape {validated_matrix.shape} but it should "
+            f"have shape ({m},{n}) matrix."
+        )
+
+    if not np.isfinite(validated_matrix).all():
+        raise ValueError(f"{name} can't contain any nan, inf, or -inf elements.")
+
+    return validated_matrix

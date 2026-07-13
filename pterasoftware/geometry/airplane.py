@@ -132,7 +132,10 @@ class Airplane:
             meters. The default is (0.0, 0.0, 0.0).
         :param weight: A number (int or float) representing the weight of the aircraft
             in Newtons. This is used by the trim functions. It must be greater than or
-            equal to zero. The default is 0.0.
+            equal to zero. The default is 0.0. In free flight, it must also be
+            consistent with the FreeFlightUnsteadyProblem's mass and the
+            OperatingPoint's gravitational acceleration, satisfying weight == mass *
+            |g_E| within floating point tolerance.
         :param s_ref: A number (int or float) representing the reference wetted area. If
             not set or set to None (the default), it populates from first Wing. If set,
             it must be greater than zero, and will be converted to a float internally.
@@ -528,7 +531,7 @@ class Airplane:
             )
             webp.save_image(
                 img=image,
-                file_path=f"{self._name}_geometry.webp",
+                file_path=f"{self._name.lower().replace(' ', '_')}_geometry.webp",
                 lossless=False,
                 quality=quality,
             )
@@ -573,10 +576,10 @@ class Airplane:
 
                 assert wing.T_pas_Wn_Ler_to_G_Cg is not None
                 airfoilOutline_G_Cg = _transformations.apply_T_to_vectors(
-                    wing.T_pas_Wn_Ler_to_G_Cg, airfoilOutline_Wn_ler, has_point=True
+                    wing.T_pas_Wn_Ler_to_G_Cg, airfoilOutline_Wn_ler, is_position=True
                 )
                 airfoilMcl_G_Cg = _transformations.apply_T_to_vectors(
-                    wing.T_pas_Wn_Ler_to_G_Cg, airfoilMcl_Wn_ler, has_point=True
+                    wing.T_pas_Wn_Ler_to_G_Cg, airfoilMcl_Wn_ler, is_position=True
                 )
 
                 these_airfoilOutlines_G_Cg.append(airfoilOutline_G_Cg)
@@ -617,7 +620,7 @@ class Airplane:
             symmetric_bounds=False,
         )
 
-        plotter.add_actor(AxesGCg)  # type: ignore[arg-type]
+        plotter.add_actor(AxesGCg)
 
         for wing_id, wing in enumerate(self._wings):
             wing_num = wing_id + 1
@@ -651,7 +654,7 @@ class Airplane:
                 symmetric_bounds=False,
             )
 
-            plotter.add_actor(AxesWLerWcs1Lp1_G_Cg)  # type: ignore[arg-type]
+            plotter.add_actor(AxesWLerWcs1Lp1_G_Cg)
 
             these_airfoilOutlines_G_Cg = airfoilOutlines_G_Cg[wing_id]
             these_airfoilMcls_G_Cg = airfoilMcls_G_Cg[wing_id]
@@ -709,7 +712,7 @@ class Airplane:
                         symmetric_bounds=False,
                     )
 
-                    plotter.add_actor(AxesWcsLp_G_Cg)  # type: ignore[arg-type]
+                    plotter.add_actor(AxesWcsLp_G_Cg)
 
             if wing.panels is not None:
                 # Initialize empty arrays to hold the Panels' vertices and faces
@@ -787,9 +790,10 @@ class Airplane:
 
     @staticmethod
     def process_wing_symmetry(wing: wing_mod.Wing) -> list[wing_mod.Wing]:
-        """Processes a Wing to determine what type of symmetry it has. If necessary, it
-        then modifies the Wing. If type 5 symmetry is detected, it also creates a second
-        reflected Wing. Finally, it returns a list of Wings.
+        """Processes a Wing to determine what type of symmetry it has.
+
+        If necessary, it then modifies the Wing. If type 5 symmetry is detected, it also
+        creates a second reflected Wing. Finally, it returns a list of Wings.
 
         :param wing: The Wing to process for symmetry analysis and potential
             modification.
@@ -824,7 +828,7 @@ class Airplane:
                     passive=False,
                 ),
                 GY_G,
-                has_point=False,
+                is_position=False,
             )
             WnY_G = _transformations.apply_T_to_vectors(
                 _transformations.generate_rot_T(
@@ -834,7 +838,7 @@ class Airplane:
                     order="xyz",
                 ),
                 GsY_G,
-                has_point=False,
+                is_position=False,
             )
 
             # If symmetryNormal_G is parallel with WnY_G, their cross product will be
@@ -918,6 +922,28 @@ class Airplane:
                         f"control_surface_symmetry_type must be specified for symmetry "
                         f"type {symmetry_type}"
                     )
+
+        # For a type 4 Wing, the root WingCrossSection lies on the coincident symmetry
+        # plane and is shared between the original and mirrored halves, which are meshed
+        # into a single Panel grid joined at that centerline seam. An asymmetric control
+        # surface there would deflect the two halves in opposite directions, so their
+        # Panels would meet at the seam with non-coincident edges. The solvers assume
+        # every internal edge within a Wing is shared by two coincident Panels (the
+        # Kutta-Joukowski effective-strength subtraction and the wake shedding both
+        # identify neighbors by grid index, not geometry), so such a torn seam would
+        # silently corrupt the loads and the wake. A zero deflection is harmless because
+        # it produces no geometric offset.
+        if symmetry_type == 4:
+            root_wing_cross_section = wing.wing_cross_sections[0]
+            if (
+                root_wing_cross_section.control_surface_symmetry_type == "asymmetric"
+                and root_wing_cross_section.control_surface_deflection != 0.0
+            ):
+                raise ValueError(
+                    "control_surface_symmetry_type cannot be 'asymmetric' with a "
+                    "nonzero control_surface_deflection on the root WingCrossSection "
+                    "of a Wing with a coincident symmetry plane"
+                )
 
         # Based on symmetry type, generate the mesh and return the wing(s).
         if symmetry_type in [1, 2, 3, 4]:

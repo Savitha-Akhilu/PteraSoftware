@@ -280,10 +280,19 @@ class Airfoil:
             -lowerOutlineHingePoint_Wcs_lp, passive=False
         )
 
-        # Make the active rotational homogeneous transformation matrix for the given
-        # angle.
-        rot_T = _transformations.generate_rot_T(
-            (0, 0, -deflection), passive=False, intrinsic=False, order="zyx"
+        # Make the active rotational homogeneous transformation matrix that deflects the
+        # aft portion about the spanwise hinge axis. The hinge points are in wing cross
+        # section axes, where +x is chordwise, +y is spanwise (normal to the cross
+        # section's plane), and +z is toward the wing's top surface. The hinge line
+        # therefore runs along +y, so the deflection is a rotation about +y. A positive
+        # deflection swings the trailing edge toward -z (downward, toward the lower
+        # surface), matching the convention that downward deflection is positive.
+        deflectionAngles_act_ezyx = np.array([0.0, deflection, 0.0])
+        deflect_T_act = _transformations.generate_rot_T(
+            deflectionAngles_act_ezyx,
+            passive=False,
+            intrinsic=False,
+            order="zyx",
         )
 
         flippedUpperOutlineBack_T_act = _transformations.generate_trans_T(
@@ -294,10 +303,12 @@ class Airfoil:
         )
 
         postHingeFlippedUpperOutline_T_act = _transformations.compose_T_act(
-            flippedUpperOutlineToOrigin_T_act, rot_T, flippedUpperOutlineBack_T_act
+            flippedUpperOutlineToOrigin_T_act,
+            deflect_T_act,
+            flippedUpperOutlineBack_T_act,
         )
         postHingeLowerOutline_T_act = _transformations.compose_T_act(
-            lowerOutlineToOrigin_T_act, rot_T, lowerOutlineBack_T_act
+            lowerOutlineToOrigin_T_act, deflect_T_act, lowerOutlineBack_T_act
         )
 
         postHingeFlippedUpperOutline_Wcs_lp = np.column_stack(
@@ -319,13 +330,13 @@ class Airfoil:
             _transformations.apply_T_to_vectors(
                 postHingeFlippedUpperOutline_T_act,
                 postHingeFlippedUpperOutline_Wcs_lp,
-                has_point=True,
+                is_position=True,
             )
         )[:, [0, 2]]
         flappedPostHingeLowerOutline_A_lp = _transformations.apply_T_to_vectors(
             postHingeLowerOutline_T_act,
             postHingeLowerOutline_Wcs_lp,
-            has_point=True,
+            is_position=True,
         )[:, [0, 2]]
 
         flappedFlippedUpperOutline_A_lp = np.vstack(
@@ -765,10 +776,11 @@ class Airfoil:
 
     @staticmethod
     def _validate_outline_preliminary(outline_A_lp: Any) -> np.ndarray:
-        """Validates the basic structure of a user's provided outline_A_lp. Only checks
-        for issues that cannot be fixed by normalization. Orientation dependent checks
-        (like x monotonicity) are deferred to _validate_outline_final() since they must
-        be performed after rotation correction.
+        """Validates the basic structure of a user's provided outline_A_lp.
+
+        Only checks for issues that cannot be fixed by normalization. Orientation
+        dependent checks (like x monotonicity) are deferred to _validate_outline_final()
+        since they must be performed after rotation correction.
 
         :param outline_A_lp: The input to validate (can be any type initially).
         :return: The validated version of outline_A_lp as a (N,2) ndarray of floats.
@@ -851,34 +863,26 @@ class Airfoil:
             # Check for excessive rotation on the first iteration. Minor rotation
             # offsets (implicit angle of attack) are acceptable, but large rotations
             # indicate the outline data is not in the expected orientation.
-            max_rotation_rad = np.deg2rad(15.0)
-            if iteration == 0 and np.abs(chord_angle) > max_rotation_rad:
+            max_rotation = 15.0
+            if iteration == 0 and np.abs(chord_angle) > np.deg2rad(max_rotation):
                 raise ValueError(
                     f"The Airfoil's outline has excessive rotation "
-                    f"({np.rad2deg(chord_angle):.1f} degrees). The chord line must be "
-                    f"within 15 degrees of the x axis. Minor rotation offsets (such as "
+                    f"({np.rad2deg(chord_angle):#.3G} deg). The chord line must be "
+                    f"within 15 deg of the x axis. Minor rotation offsets (such as "
                     f"implicit angle of attack) are corrected automatically, but the "
                     f"outline data appears to be in an unexpected orientation."
                 )
 
-            # TODO: Create a 2D rotation matrix function in _transformations.py,
-            #  validate it, and use it here. Also, update the rotation matrix variable
-            #  to be an active matrix and use the "active" variable name convention.
-            # Create rotation matrix to rotate chord onto x axis.
-            cos_neg_angle = np.cos(-chord_angle)
-            sin_neg_angle = np.sin(-chord_angle)
-            R_pas_old_to_new = np.array(
-                [
-                    [cos_neg_angle, -sin_neg_angle],
-                    [sin_neg_angle, cos_neg_angle],
-                ],
-                dtype=float,
+            # Create an active rotation matrix to rotate the chord onto x axis.
+            # Convert the angle to degrees to match the _transformations.py standard.
+            rot_R_act = _transformations.generate_2D_rot_R(
+                angle=np.rad2deg(-chord_angle), passive=False
             )
 
-            # Apply rotation to all points.
-            self._outline_A_lp = (R_pas_old_to_new @ self._outline_A_lp.T).T
+            # Apply the active rotation to all points.
+            self._outline_A_lp = (rot_R_act @ self._outline_A_lp.T).T
 
-            # Check if the point at origin is still the minimum x point.
+            # Check if the point at the origin is still the minimum x point.
             new_lp_index = self._lp_index()
             new_min_x = self._outline_A_lp[new_lp_index, 0]
 

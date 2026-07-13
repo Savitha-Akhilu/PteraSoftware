@@ -8,6 +8,7 @@ This document defines the conventions for type hints and docstrings in the Ptera
 - [Docstring Format](#docstring-format)
     - [Module-Level Docstrings](#module-level-docstrings)
     - [Class Docstrings](#class-docstrings)
+    - [Public Subclasses of Private Parents](#public-subclasses-of-private-parents)
     - [Function and Method Docstrings](#function-and-method-docstrings)
 - [Examples](#examples)
 
@@ -107,7 +108,7 @@ Use `cast()` sparingly, only when the type checker cannot infer what you know to
 from typing import cast
 
 # For dtype=object arrays where we know the element type
-ring_vortex = cast(_vortices.ring_vortex.RingVortex, object_array[i, j], )
+panel = cast(_panel.Panel, object_array[i, j])
 ```
 
 **Use `cast()` when:**
@@ -116,7 +117,9 @@ ring_vortex = cast(_vortices.ring_vortex.RingVortex, object_array[i, j], )
 - You're certain of the type but can't prove it to the type checker
 - No runtime check is needed
 
-**Avoid `cast()` for `Type | None` → `Type` narrowing** - use `assert` instead for runtime safety.
+**Avoid `cast()` for `Type | None` -> `Type` narrowing** - use `assert` instead for runtime safety.
+
+When the type being cast to lives across a circular import boundary, use the string form (`cast("OtherClass", value)`). See "Casting Across a Circular Dependency" below.
 
 ### Module Alias Pattern
 
@@ -174,6 +177,24 @@ This approach:
 - Requires no string quotes around type hints
 - Is the default behavior in Python 3.11+
 
+#### Casting Across a Circular Dependency
+
+`from __future__ import annotations` defers type-hint evaluation but does not help with `cast()`, which is a runtime call whose first argument is evaluated. When narrowing a type that lives across a circular boundary, use the string form of `cast()` so the type name does not need to be importable at runtime:
+
+```python
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from .other_module import OtherClass
+
+
+def narrow(value):
+    other = cast("OtherClass", value)
+    ...
+```
+
+The `TYPE_CHECKING` import gives mypy the symbol for static resolution; the string argument keeps the runtime call free of any reference to `OtherClass`. Prefer this over importing `OtherClass` inside the function body: in-function imports are reserved for genuine lazy-load or circular cases, and the string-form `cast()` resolves the circularity without that escape hatch, keeping all imports at the top of the file.
+
 ---
 
 ## Docstring Format
@@ -186,11 +207,10 @@ This approach:
 4. **Begin descriptions with article + shape/type info for arrays** (e.g., "A (4,4) ndarray of floats...")
 5. **Use present tense for descriptions** (e.g., "Returns..." not "Will return...")
 6. **Avoid starting descriptions with "This..."**
-7. **Never use em-dashes (—) or en-dashes (–); always use hyphens (-)**
-8. **Never use multiplication sign (×); use lowercase x**
-9. **Never use pi symbol (π); write "pi"**
-10. **Never use approximately-equal sign (≈); use "~"**
-11. **Place closing triple-quotes on their own line**
+7. **Follow the ASCII Only rule in [WRITING_STYLE.md](WRITING_STYLE.md)**, which covers all character substitutions (dashes, math symbols, smart quotes, ellipsis, arrows, emojis, and other typographic Unicode) used across the project's prose, comments, and docstrings.
+8. **Place closing triple-quotes on their own line**
+9. **Summary line is a single sentence.** Any additional description goes in a new paragraph after a blank line. docformatter enforces this: if the first paragraph contains multiple sentences, it moves all but the first into a new paragraph.
+10. **No blank line between the closing triple-quotes and the next line of code.** docformatter enforces this too: a blank gap after the docstring will be removed.
 
 ### Module-Level Docstrings
 
@@ -417,6 +437,154 @@ def __init__(
 - Only document parameters that are NEW to the subclass
 - Call `super().__init__()` with inherited parameters
 
+### Public Subclasses of Private Parents
+
+When a public class inherits from a private parent (a class in an underscore prefixed module like `_core.py`), the conventions above are inverted. The public child keeps a self-contained docstring that documents inherited methods and parameters as its own. The private parent's class docstring and `__init__` docstring use minimal descriptions that reference the public child. However, public methods and properties on the private parent must have self-contained docstrings because they appear on the public child's RTD page via inheritance (see "Private Parent Method and Property Docstrings" below).
+
+This is because:
+
+1. The ReadTheDocs site is purely public API. Private parents are excluded from the generated documentation, but inherited public methods and properties DO appear on the public child's page.
+2. Users should never need to navigate to a private module to understand the public API.
+3. Contributors reading the private parent's source code can easily navigate to the public child for full documentation of the class and `__init__`.
+
+#### Private Parent Class Docstring Template
+
+```python
+class _CoreClass:
+    """A core class used to contain the shared foundation of PublicClass and its
+    feature variant siblings.
+
+    See PublicClass for full documentation of the shared interface.
+
+    <Brief description of what the core class provides and why it exists as a
+    separate class, aimed at contributors who need to understand the internal
+    architecture.>
+    """
+```
+
+**Key points:**
+
+- Reference the public child for full documentation of the shared interface
+- Include a brief architectural description for contributors
+- Do not duplicate the full method listing or parameter documentation
+
+#### Private Parent `__init__` Docstring Template
+
+```python
+def __init__(
+    self,
+    param1: Type1,
+    param2: Type2,
+) -> None:
+    """The initialization method.
+
+    See PublicClass's initialization method for full parameter descriptions.
+
+    :param param1: Brief description.
+    :param param2: Brief description.
+    :return: None
+    """
+```
+
+**Key points:**
+
+- Reference the public child's `__init__` docstring for full parameter descriptions
+- Include brief parameter descriptions (enough for contributors to understand the code without navigating away)
+
+#### Public Child Class Docstring Template
+
+```python
+class PublicClass(_core.CoreClass):
+    """A class used to <description>.
+
+    **Contains the following methods:**
+
+    inherited_method_1: Short description.
+
+    inherited_method_2: Short description.
+
+    new_method_1: Short description (if any).
+    """
+```
+
+**Key points:**
+
+- Do not mention the private parent in the short description or the methods listing
+- List all methods (inherited and new) as if they were the child's own
+- The class reads as a standalone public API entry point
+
+#### Public Child `__init__` Docstring Template
+
+```python
+def __init__(
+    self,
+    inherited_param1: Type1,
+    inherited_param2: Type2,
+    new_param: Type3,
+) -> None:
+    """The initialization method.
+
+    :param inherited_param1: Full description.
+    :param inherited_param2: Full description.
+    :param new_param: Full description.
+    :return: None
+    """
+    super().__init__(inherited_param1, inherited_param2)
+    self.new_param = new_param
+```
+
+**Key points:**
+
+- Document all parameters fully (inherited and new)
+- Do not reference the private parent
+
+#### Private Parent Method and Property Docstrings
+
+Public methods and properties defined on a private parent are inherited by all public children and appear on their RTD pages. Their docstrings must therefore be self-contained and written for a public audience, unlike the class and `__init__` docstrings which can defer to the public child.
+
+**Rules:**
+
+1. **No deferral language.** Do not write "see child class for full details" or similar, since the docstring IS the documentation the user sees on the child's page.
+2. **No references to specific sibling types.** A `CoreWingMovement` method docstring must not mention `WingCrossSectionMovement` or `AeroelasticWingCrossSectionMovement`, because the docstring appears on all siblings' RTD pages. Instead, reference the universal geometry class that the movement class manages (e.g., `WingCrossSection`), since geometry classes have no feature subclasses and are always correct.
+3. **Use "each X's movement class" framing** when referring to child movement objects. For example, write "each `WingCrossSection`'s movement class" rather than "its `WingCrossSection`s' movement classes". This avoids implying that a movement class owns geometry objects (movement classes own other movement classes; geometry classes own geometry classes).
+
+**Example (correct):**
+
+```python
+# On CoreWingMovement
+@property
+def wing_cross_section_movements(self) -> tuple:
+    """The movement classes for each of this Wing's WingCrossSections.
+
+    :return: A tuple of movement classes, one per WingCrossSection.
+    """
+```
+
+**Example (incorrect):**
+
+```python
+# References a specific sibling type
+@property
+def wing_cross_section_movements(self) -> tuple:
+    """The WingCrossSectionMovements for this WingMovement.
+    ...
+    """
+
+# Uses deferral language
+def generate_wing_at_time_step(self, ...) -> Wing:
+    """Generates a Wing at a single time step.
+
+    See WingMovement for full details.
+    ...
+    """
+```
+
+**Scope:** This rule applies only to public methods and properties on core classes (those that will be inherited and displayed on RTD). Private helper methods (underscore prefixed) on core classes are internal and can use any convenient wording.
+
+#### Multiple Public Siblings
+
+When multiple public classes share the same private parent (e.g., `Movement`, `FreeFlightMovement`, and `AeroelasticMovement` all extending `CoreMovement`), each sibling maintains its own self-contained docstring. The inherited method descriptions can be tailored to each sibling's context (e.g., "Movement's sub movement objects" vs "FreeFlightMovement's sub movement objects").
+
 ### Property Docstring Template
 
 ```python
@@ -572,9 +740,11 @@ def _get_mcl_points(
     chordwise_coordinates: np.ndarray,
 ) -> list[np.ndarray]:
     """Takes in the inner and outer Airfoils of a wing section and its normalized
-    chordwise coordinates. It returns a list of four column vectors containing the
-    normalized components of the positions of points along the mean camber line (MCL)
-    (in each Airfoil's axes, relative to each Airfoil's leading point).
+    chordwise coordinates.
+
+    It returns a list of four column vectors containing the normalized components of
+    the positions of points along the mean camber line (MCL) (in each Airfoil's axes,
+    relative to each Airfoil's leading point).
 
     :param inner_airfoil: The wing section's inner Airfoil.
     :param outer_airfoil: The wing section's outer Airfoil.
@@ -674,6 +844,7 @@ def add_control_surface(
     self, deflection: float | int, hinge_point: float | int
 ) -> Airfoil:
     """Returns a version of the Airfoil with a control surface added at a given point.
+
     It is called during meshing.
 
     :param deflection: The control deflection in degrees. Deflection downwards is
@@ -708,7 +879,9 @@ def get_resampled_mcl(
     self, mcl_fractions: np.ndarray | Sequence[float]
 ) -> np.ndarray:
     """Returns a ndarray of points along the mean camber line (MCL), resampled from the
-    mcl_A_outline attribute. It is used to discretize the MCL for meshing.
+    mcl_A_outline attribute.
+
+    It is used to discretize the MCL for meshing.
 
     :param mcl_fractions: A (N,) array-like object of floats representing normalized
         distances along the MCL (from the leading to the trailing edge) at which to
@@ -805,4 +978,3 @@ param: Type1 | Type2
 - All existing code should gradually be updated to match this style
 - Use `docformatter` or similar tools to help maintain consistent formatting
 - Shape information is critical and must always be included in docstrings for arrays
-- Avoid using hyphens or other forms of dashes in docstrings or comments. This is because they are often incorrectly wrapped by docformatter and incorrectly rendered in PyCharm's quick documentation. For example, even though not standard grammar, it's okay to write "non symmetric" instead of "non-symmetric".

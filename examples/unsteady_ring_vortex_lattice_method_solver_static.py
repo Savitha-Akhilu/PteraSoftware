@@ -1,14 +1,19 @@
-"""This is script is an example of how to run Ptera Software's
-UnsteadyRingVortexLatticeMethodSolver with a custom Airplane with a static Movement."""
+"""Demonstrates Ptera Software's UnsteadyRingVortexLatticeMethodSolver with a custom
+airplane with static geometry.
+
+The script will log simulation results in a log file.
+"""
+
+import logging
 
 # First, import the software's main package. Note that if you wished to import this
 # software into another package, you would first install it by running "pip install
 # pterasoftware" in your terminal.
 import pterasoftware as ps
 
-# Configure logging to display info level messages. This is important for seeing the
-# output from the log_results function.
-ps.set_up_logging(level="Info")
+# Configure logging to write info level messages to a file. To display log messages on
+# the console alongside progress bars instead, omit the handler argument.
+ps.set_up_logging(level="Info", handler=logging.FileHandler("example_solver.log"))
 
 # Create an Airplane with our custom geometry. I am going to declare every parameter
 # for Airplane, even though most of them have usable default values. This is for
@@ -283,32 +288,41 @@ example_solver.run(
     show_progress=True,
 )
 
-ps.output.log_results(solver=example_solver)
+# Save the solved solver to a compressed JSON file. This allows us to load the results
+# later without re-running the simulation. Use ".json.gz" for gzip compression, which is
+# recommended over plain JSONs for all but the smallest, unmeshed geometry objects.
+ps.save("example_solver.json.gz", example_solver)
 
-# Call the draw function on the solver. Press "q" to close the plotter after it draws
-# the output.
+# Load the saved solver. The loaded object is identical to the original and can be
+# passed to any output function.
+loaded_solver = ps.load("example_solver.json.gz")
+
+ps.output.log_results(solver=loaded_solver)
+
+# Call the draw function on the loaded solver. Press any key to close the plotter after
+# it draws the output.
 ps.output.draw(
-    solver=example_solver,
+    solver=loaded_solver,
     scalar_type="lift",
     show_streamlines=True,
     show_wake_vortices=False,
-    save=False,
+    save=True,
 )
 
-# Call the animate function on the solver. This produces a GIF of the wake being
-# shed. The GIF is saved in the same directory as this script. Press "q",
-# after orienting the view, to begin the animation.
+# Call the animate function on the loaded solver. This produces a GIF of the wake being shed.
+# The GIF is saved in the same directory as this script. Press any key, after orienting
+# the view, to begin the animation.
 ps.output.animate(
-    unsteady_solver=example_solver,
+    unsteady_solver=loaded_solver,
     scalar_type="lift",
     show_wake_vortices=True,
-    save=False,
+    save=True,
 )
 
 # Call the plotting function on the solver. This produces graphs of the loads with
 # respect to time.
 ps.output.plot_results_versus_time(
-    unsteady_solver=example_solver,
+    unsteady_solver=loaded_solver,
     show=True,
-    save=False,
+    save=True,
 )

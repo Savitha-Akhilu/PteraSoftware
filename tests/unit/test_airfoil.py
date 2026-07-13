@@ -184,6 +184,54 @@ class TestAirfoil(unittest.TestCase):
         )
         self.assertIs(result, self.naca0012_airfoil)
 
+    def test_add_control_surface_deflects_trailing_edge_in_z(self):
+        """A positive deflection lowers the trailing edge along wing cross section z,
+        and an equal negative deflection raises it by an equal amount.
+
+        The Airfoil's mean camber line is in airfoil axes, whose y-component is the
+        wing cross section z-component: the airfoil embeds in wing cross section axes
+        with the chord along x, the span along y, and the thickness along z. A positive
+        deflection is defined as downward, toward wing cross section -z, so the trailing
+        edge's z-component must decrease for a positive deflection and increase by the
+        same magnitude for an equal-magnitude negative deflection.
+        """
+        hinge_point = 0.75
+        deflection = 5.0
+        airfoil = self.naca0012_airfoil
+
+        assert airfoil.mcl_A_lp is not None
+        undeflected_trailingZ_A_lp = airfoil.mcl_A_lp[
+            np.argmax(airfoil.mcl_A_lp[:, 0]), 1
+        ]
+
+        deflected_down_airfoil = airfoil.add_control_surface(
+            deflection=deflection, hinge_point=hinge_point
+        )
+        deflected_up_airfoil = airfoil.add_control_surface(
+            deflection=-deflection, hinge_point=hinge_point
+        )
+
+        assert deflected_down_airfoil.mcl_A_lp is not None
+        assert deflected_up_airfoil.mcl_A_lp is not None
+        down_trailingZ_A_lp = deflected_down_airfoil.mcl_A_lp[
+            np.argmax(deflected_down_airfoil.mcl_A_lp[:, 0]), 1
+        ]
+        up_trailingZ_A_lp = deflected_up_airfoil.mcl_A_lp[
+            np.argmax(deflected_up_airfoil.mcl_A_lp[:, 0]), 1
+        ]
+
+        # A positive (downward) deflection decreases the trailing edge z-component.
+        self.assertLess(down_trailingZ_A_lp, undeflected_trailingZ_A_lp)
+
+        # An equal-magnitude negative (upward) deflection increases it.
+        self.assertGreater(up_trailingZ_A_lp, undeflected_trailingZ_A_lp)
+
+        # The decrease and the increase have equal magnitude.
+        self.assertAlmostEqual(
+            undeflected_trailingZ_A_lp - down_trailingZ_A_lp,
+            up_trailingZ_A_lp - undeflected_trailingZ_A_lp,
+        )
+
     def test_parameter_validation_invalid_inputs(self):
         """Test that invalid parameters raise appropriate errors."""
         # Test outlines with insufficient points in upper portion. These outlines have
@@ -322,8 +370,8 @@ class TestAirfoil(unittest.TestCase):
         )
 
         # Rotate the outline by 20 degrees (exceeds 15 degree limit)
-        angle_rad = np.radians(20.0)
-        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        angleRad = np.deg2rad(20.0)
+        cos_a, sin_a = np.cos(angleRad), np.sin(angleRad)
         rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
         rotated_outline = (rotation_matrix @ valid_outline.T).T
 
@@ -353,8 +401,8 @@ class TestAirfoil(unittest.TestCase):
         )
 
         # Rotate the outline by 10 degrees (within 15 degree limit)
-        angle_rad = np.radians(10.0)
-        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        angleRad = np.deg2rad(10.0)
+        cos_a, sin_a = np.cos(angleRad), np.sin(angleRad)
         rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
         rotated_outline = (rotation_matrix @ valid_outline.T).T
 
@@ -636,7 +684,6 @@ class TestAirfoilImmutability(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures for immutability tests."""
         self.naca0012_airfoil = geometry_fixtures.make_naca0012_airfoil_fixture()
-        self.naca2412_airfoil = geometry_fixtures.make_naca2412_airfoil_fixture()
 
     def test_immutable_name_property(self):
         """Test that name property is read only."""
@@ -683,11 +730,9 @@ class TestAirfoilDeepCopy(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures for deepcopy tests."""
         self.naca0012_airfoil = geometry_fixtures.make_naca0012_airfoil_fixture()
-        self.naca2412_airfoil = geometry_fixtures.make_naca2412_airfoil_fixture()
         self.custom_outline_airfoil = (
             geometry_fixtures.make_custom_outline_airfoil_fixture()
         )
-        self.resampled_airfoil = geometry_fixtures.make_resampled_airfoil_fixture()
         self.non_resampled_airfoil = (
             geometry_fixtures.make_non_resampled_airfoil_fixture()
         )
@@ -953,7 +998,6 @@ class TestAirfoilGetResampledMcl(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures for get_resampled_mcl tests."""
         self.naca0012_airfoil = geometry_fixtures.make_naca0012_airfoil_fixture()
-        self.naca2412_airfoil = geometry_fixtures.make_naca2412_airfoil_fixture()
 
     def test_get_resampled_mcl_returns_correct_shape(self):
         """Test that get_resampled_mcl returns correct shape."""
@@ -1044,7 +1088,6 @@ class TestAirfoilEdgeCases(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures for edge case tests."""
-        self.naca0012_airfoil = geometry_fixtures.make_naca0012_airfoil_fixture()
 
     def test_minimum_n_points_per_side(self):
         """Test Airfoil with minimum valid n_points_per_side (3)."""
@@ -1169,7 +1212,3 @@ class TestAirfoilEdgeCases(unittest.TestCase):
             ps.geometry.airfoil.Airfoil(
                 name="int_outline", outline_A_lp=outline_int, resample=False
             )
-
-
-if __name__ == "__main__":
-    unittest.main()

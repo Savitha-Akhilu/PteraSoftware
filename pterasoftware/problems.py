@@ -1,10 +1,17 @@
-"""Contains the SteadyProblem and UnsteadyProblem classes.
+"""Contains the SteadyProblem, UnsteadyProblem, AeroelasticUnsteadyProblem, and
+FreeFlightUnsteadyProblem classes.
 
 **Contains the following classes:**
 
 SteadyProblem: A class used to contain steady aerodynamics problems.
 
 UnsteadyProblem: A class used to contain unsteady aerodynamics problems.
+
+AeroelasticUnsteadyProblem: A class used to couple unsteady aerodynamics with wing
+structural dynamics (torsional spring-mass-damper model) for aeroelastic simulations.
+
+FreeFlightUnsteadyProblem: A class used to contain problems with coupled unsteady
+aerodynamics and rigid body dynamics.
 
 **Contains the following functions:**
 
@@ -13,12 +20,41 @@ None
 
 from __future__ import annotations
 
-import math
+import copy
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, cast
 
+import matplotlib.pyplot as plt
 import numpy as np
+from scipy.integrate import solve_ivp
 
-from . import _parameter_validation, _transformations, geometry, movements
+from . import (
+    _core,
+    _fixed_point_relaxation,
+    _logging,
+    _mujoco_model,
+    _parameter_validation,
+    _transformations,
+    geometry,
+    movements,
+)
 from . import operating_point as operating_point_mod
+from .movements import aeroelastic_movement as aeroelastic_movement_mod
+from .movements import aeroelastic_wing_movement as aeroelastic_wing_movement_mod
+from .movements import free_flight_movement
+
+if TYPE_CHECKING:
+    from ._coupled_unsteady_ring_vortex_lattice_method import (
+        CoupledUnsteadyRingVortexLatticeMethodSolver,
+    )
+    from .aeroelastic_unsteady_ring_vortex_lattice_method import (
+        AeroelasticUnsteadyRingVortexLatticeMethodSolver,
+    )
+    from .free_flight_unsteady_ring_vortex_lattice_method import (
+        FreeFlightUnsteadyRingVortexLatticeMethodSolver,
+    )
+
+_logger = _logging.get_logger("problems")
 
 
 class SteadyProblem:
@@ -83,16 +119,16 @@ class SteadyProblem:
 
                 for panel in np.ravel(wing.panels):
                     panel.Frpp_GP1_CgP1 = _transformations.apply_T_to_vectors(
-                        T_pas_G_Cg_to_GP1_CgP1, panel.Frpp_G_Cg, has_point=True
+                        T_pas_G_Cg_to_GP1_CgP1, panel.Frpp_G_Cg, is_position=True
                     )
                     panel.Flpp_GP1_CgP1 = _transformations.apply_T_to_vectors(
-                        T_pas_G_Cg_to_GP1_CgP1, panel.Flpp_G_Cg, has_point=True
+                        T_pas_G_Cg_to_GP1_CgP1, panel.Flpp_G_Cg, is_position=True
                     )
                     panel.Blpp_GP1_CgP1 = _transformations.apply_T_to_vectors(
-                        T_pas_G_Cg_to_GP1_CgP1, panel.Blpp_G_Cg, has_point=True
+                        T_pas_G_Cg_to_GP1_CgP1, panel.Blpp_G_Cg, is_position=True
                     )
                     panel.Brpp_GP1_CgP1 = _transformations.apply_T_to_vectors(
-                        T_pas_G_Cg_to_GP1_CgP1, panel.Brpp_G_Cg, has_point=True
+                        T_pas_G_Cg_to_GP1_CgP1, panel.Brpp_G_Cg, is_position=True
                     )
 
     # --- Immutable: read only properties ---
@@ -138,34 +174,32 @@ class SteadyProblem:
         return self._reynolds_numbers
 
 
-class UnsteadyProblem:
+class UnsteadyProblem(_core.CoreUnsteadyProblem):
     """A class used to contain unsteady aerodynamics problems.
 
     **Contains the following methods:**
 
-    None
+    only_final_results: Determines whether the solver will only calculate loads for the
+    final time step or final cycle.
+
+    num_steps: The number of time steps.
+
+    delta_time: The time step size in seconds.
+
+    first_averaging_step: The first time step included in cycle averaging.
+
+    first_results_step: The first time step for which loads are calculated.
+
+    max_wake_rows: The maximum chordwise wake rows per Wing.
+
+    movement: The Movement that contains this UnsteadyProblem's OperatingPointMovement
+    and AirplaneMovements.
+
+    steady_problems: A tuple of SteadyProblems, one for each time step.
     """
 
     __slots__ = (
         "_movement",
-        "_only_final_results",
-        "_num_steps",
-        "_delta_time",
-        "_max_wake_rows",
-        "_first_averaging_step",
-        "_first_results_step",
-        "finalForces_W",
-        "finalForceCoefficients_W",
-        "finalMoments_W_CgP1",
-        "finalMomentCoefficients_W_CgP1",
-        "finalMeanForces_W",
-        "finalMeanForceCoefficients_W",
-        "finalMeanMoments_W_CgP1",
-        "finalMeanMomentCoefficients_W_CgP1",
-        "finalRmsForces_W",
-        "finalRmsForceCoefficients_W",
-        "finalRmsMoments_W_CgP1",
-        "finalRmsMomentCoefficients_W_CgP1",
         "_steady_problems",
     )
 
@@ -186,69 +220,21 @@ class UnsteadyProblem:
             will be converted internally to a bool. The default is False.
         :return: None
         """
-        # Validate and store immutable attributes.
+        # Validate and store the Movement before calling super().__init__() because
+        # the Movement provides the parameters that the core class needs.
         if not isinstance(movement, movements.movement.Movement):
             raise TypeError("movement must be a Movement.")
         self._movement = movement
-        self._only_final_results = _parameter_validation.boolLike_return_bool(
-            only_final_results, "only_final_results"
+
+        # Delegate shared initialization (validation, first_averaging_step computation,
+        # load list initialization) to the core class.
+        super().__init__(
+            only_final_results=only_final_results,
+            delta_time=self._movement.delta_time,
+            num_steps=self._movement.num_steps,
+            max_wake_rows=self._movement.max_wake_rows,
+            lcm_period=self._movement.lcm_period,
         )
-
-        self._num_steps: int = self._movement.num_steps
-        self._delta_time: float = self._movement.delta_time
-        self._max_wake_rows: int | None = self._movement.max_wake_rows
-
-        # For UnsteadyProblems with a static Movement, we are typically interested in
-        # the final time step's forces and moments, which, assuming convergence, will be
-        # the most accurate. For UnsteadyProblems with cyclic movement, (e.g. flapping
-        # wings) we are typically interested in the forces and moments averaged over the
-        # last cycle simulated. Use the LCM of all motion periods to ensure we average
-        # over a complete cycle of all motions.
-        _movement_lcm_period = self._movement.lcm_period
-        self._first_averaging_step: int
-        if _movement_lcm_period == 0:
-            self._first_averaging_step = self._num_steps - 1
-        else:
-            self._first_averaging_step = max(
-                0,
-                math.floor(self._num_steps - (_movement_lcm_period / self._delta_time)),
-            )
-
-        # If we only wants to calculate forces and moments for the final cycle (for a
-        # cyclic Movement) or for the final time step (for a static Movement) set the
-        # first step to calculate results to the first averaging step. Otherwise, set it
-        # to the zero, which is the first time step.
-        self._first_results_step: int
-        if self._only_final_results:
-            self._first_results_step = self._first_averaging_step
-        else:
-            self._first_results_step = 0
-
-        # Initialize empty lists to hold the final loads and load coefficients each
-        # Airplane experiences. These will only be populated if this UnsteadyProblem's
-        # Movement is static. These are mutable and populated by the solver.
-        self.finalForces_W: list[np.ndarray] = []
-        self.finalForceCoefficients_W: list[np.ndarray] = []
-        self.finalMoments_W_CgP1: list[np.ndarray] = []
-        self.finalMomentCoefficients_W_CgP1: list[np.ndarray] = []
-
-        # Initialize empty lists to hold the final cycle-averaged loads and load
-        # coefficients each Airplane experiences. These will only be populated if this
-        # UnsteadyProblem's Movement is cyclic. These are mutable and populated by the
-        # solver.
-        self.finalMeanForces_W: list[np.ndarray] = []
-        self.finalMeanForceCoefficients_W: list[np.ndarray] = []
-        self.finalMeanMoments_W_CgP1: list[np.ndarray] = []
-        self.finalMeanMomentCoefficients_W_CgP1: list[np.ndarray] = []
-
-        # Initialize empty lists to hold the final cycle-root-mean-squared loads and
-        # load coefficients each airplane object experiences. These will only be
-        # populated for variable geometry problems. These are mutable and populated by
-        # the solver.
-        self.finalRmsForces_W: list[np.ndarray] = []
-        self.finalRmsForceCoefficients_W: list[np.ndarray] = []
-        self.finalRmsMoments_W_CgP1: list[np.ndarray] = []
-        self.finalRmsMomentCoefficients_W_CgP1: list[np.ndarray] = []
 
         # Initialize an empty list to hold the SteadyProblems as they are generated.
         steady_problems_temp: list[SteadyProblem] = []
@@ -279,29 +265,2086 @@ class UnsteadyProblem:
         return self._movement
 
     @property
-    def only_final_results(self) -> bool:
-        return self._only_final_results
+    def steady_problems(self) -> tuple[SteadyProblem, ...]:
+        return self._steady_problems
 
-    @property
-    def num_steps(self) -> int:
-        return self._num_steps
 
-    @property
-    def delta_time(self) -> float:
-        return self._delta_time
+class _CoupledUnsteadyProblem(_core.CoreUnsteadyProblem):
+    """A class for coupled unsteady aerodynamics problems.
 
-    @property
-    def first_averaging_step(self) -> int:
-        return self._first_averaging_step
+    This class extends CoreUnsteadyProblem to manage SteadyProblems for coupled
+    simulations where the geometry at each time step depends on the solver's results
+    from previous time steps.
 
-    @property
-    def first_results_step(self) -> int:
-        return self._first_results_step
+    **Contains the following methods:**
 
+    movement: The CoreMovement that defines the motion parameters for this problem.
+
+    steady_problems: A tuple of SteadyProblems, one for each time step that has been
+    initialized so far.
+
+    get_steady_problem: Gets the SteadyProblem at a specified time step.
+
+    initialize_next_problem: Initializes the next time step's SteadyProblem. Must be
+    overridden by subclasses.
+    """
+
+    __slots__ = (
+        "_movement",
+        "_steady_problems",
+    )
+
+    def __init__(
+        self,
+        movement: _core.CoreMovement,
+        initial_airplanes: list[geometry.airplane.Airplane],
+        initial_operating_point: operating_point_mod.OperatingPoint,
+    ) -> None:
+        """The initialization method.
+
+        Initializes the coupled unsteady problem with the first time step's geometry and
+        the motion parameters from the provided CoreMovement.
+
+        :param movement: A CoreMovement object that defines the motion parameters
+            (delta_time, num_steps, max_wake_rows, lcm_period) for this problem.
+        :param initial_airplanes: The list of Airplanes at the first time step.
+        :param initial_operating_point: The OperatingPoint at the first time step.
+        :return: None
+        """
+        self._movement = movement
+
+        # Delegate shared initialization (validation, first_averaging_step computation,
+        # load list initialization) to the core class. _CoupledUnsteadyProblems require
+        # per step results to feed the coupling hook, so only_final_results is always
+        # False.
+        super().__init__(
+            only_final_results=False,
+            delta_time=self._movement.delta_time,
+            num_steps=self._movement.num_steps,
+            max_wake_rows=self._movement.max_wake_rows,
+            lcm_period=self._movement.lcm_period,
+        )
+
+        # Coupled-specific state: a mutable list of SteadyProblems that grows as the
+        # solver advances. Subclass initialize_next_problem overrides append to this
+        # list; external code reads through the steady_problems tuple-view property to
+        # preserve the read-only contract inherited from UnsteadyProblem. Seed with a
+        # SteadyProblem built from the initial geometry so step zero is always ready.
+        self._steady_problems: list[SteadyProblem] = [
+            SteadyProblem(
+                airplanes=initial_airplanes,
+                operating_point=initial_operating_point,
+            )
+        ]
+
+    # --- Immutable: read only properties ---
     @property
-    def max_wake_rows(self) -> int | None:
-        return self._max_wake_rows
+    def movement(self) -> _core.CoreMovement:
+        return self._movement
 
     @property
     def steady_problems(self) -> tuple[SteadyProblem, ...]:
-        return self._steady_problems
+        return tuple(self._steady_problems)
+
+    def get_steady_problem(self, step: int) -> SteadyProblem:
+        """Get the SteadyProblem at a given time step.
+
+        :param step: The time step index (zero indexed). Must be greater than or equal
+            to zero and less than the total number of time steps.
+        :return: The SteadyProblem at the specified time step.
+        """
+        step = _parameter_validation.int_in_range_return_int(
+            step, "step", 0, True, len(self._steady_problems), False
+        )
+
+        return self._steady_problems[step]
+
+    def initialize_next_problem(
+        self,
+        solver: CoupledUnsteadyRingVortexLatticeMethodSolver,
+        step: int,
+    ) -> None:
+        """Initialize the next time step's SteadyProblem and perform per step work.
+
+        Subclasses must override this method. It is invoked by the solver on every step,
+        so subclasses are responsible for guarding any work that depends on a next step
+        existing (such as building the next SteadyProblem) with ``step < self.num_steps
+        - 1``. Per step work that should run on every step (such as recording the
+        current step's loads) belongs outside that guard.
+
+        :param solver: The CoupledUnsteadyRingVortexLatticeMethodSolver instance
+            providing aerodynamic data from the current time step.
+        :param step: The current time step index (zero indexed).
+        :return: None
+        :raises NotImplementedError: Always. Subclasses must override this method.
+        """
+        raise NotImplementedError("Subclasses must implement initialize_next_problem.")
+
+
+# The permitted top-level keys for FreeFlightUnsteadyProblem's extra_xml injection-point
+# dict. Each maps to an XML fragment that MuJoCoModel injects into the generated model
+# XML at the matching location.
+_EXTRA_XML_INJECTION_POINTS = frozenset(
+    {"default", "asset", "visual", "worldbody", "body"}
+)
+
+# The permitted values for FreeFlightUnsteadyProblem's integrator parameter. Each names
+# a MuJoCo numerical integrator that MuJoCoModel sets in the generated model XML's
+# option element.
+_MUJOCO_INTEGRATORS = frozenset({"Euler", "RK4", "implicit", "implicitfast"})
+
+# Strongly coupled free-flight sub-iteration tunables. The relative and absolute
+# tolerances form the mixed convergence test on the nondimensionalized state residual. The
+# divergence tolerance guards the Aitken relaxation factor against a collapsing
+# denominator. The initial relaxation factor under-relaxes the first update before the
+# Aitken formula takes over.
+_SUBITERATION_RELATIVE_TOLERANCE = 1e-6
+_SUBITERATION_ABSOLUTE_TOLERANCE = 1e-10
+_SUBITERATION_DIVERGENCE_TOLERANCE = 1e-20
+_SUBITERATION_INITIAL_RELAXATION_FACTOR = 0.5
+
+
+class FreeFlightUnsteadyProblem(_CoupledUnsteadyProblem):
+    """A class used to contain problems with coupled unsteady aerodynamics and rigid
+    body dynamics.
+
+    **Contains the following methods:**
+
+    only_final_results: Determines whether the solver will only calculate loads for the
+    final time step or final cycle.
+
+    num_steps: The number of time steps.
+
+    delta_time: The time step size in seconds.
+
+    first_averaging_step: The first time step included in cycle averaging.
+
+    first_results_step: The first time step for which loads are calculated.
+
+    max_wake_rows: The maximum chordwise wake rows per Wing.
+
+    movement: The FreeFlightMovement that defines the motion parameters for this
+    FreeFlightUnsteadyProblem.
+
+    steady_problems: A tuple of SteadyProblems, one for each time step that has been
+    initialized so far.
+
+    get_steady_problem: Gets the SteadyProblem at a specified time step.
+
+    initialize_next_problem: Initializes the next time step's SteadyProblem from rigid
+    body dynamics.
+
+    mass: The mass of the Airplane in kilograms.
+
+    I_BP1_CgP1: The inertia matrix of the Airplane (in the first Airplane's body axes,
+    relative to the first Airplane's CG) in kilogram square meters.
+
+    external_loads_fn: A callable that computes additional forces and moments to apply
+    to the Airplane during the simulation, or None.
+    """
+
+    __slots__ = (
+        "_I_BP1_CgP1",
+        "_mass",
+        "_external_loads_fn",
+        "_external_loads_validated",
+        "_k_max",
+        "_mujoco_model",
+    )
+
+    def __init__(
+        self,
+        movement: movements.free_flight_movement.FreeFlightMovement,
+        mass: float | int,
+        I_BP1_CgP1: np.ndarray | Sequence[Sequence[float | int]],
+        external_loads_fn: (
+            Callable[
+                [
+                    operating_point_mod.OperatingPoint,
+                    geometry.airplane.Airplane,
+                ],
+                tuple[np.ndarray, np.ndarray],
+            ]
+            | None
+        ) = None,
+        k_max: int = 20,
+        integrator: str = "RK4",
+        extra_xml: dict[str, str] | None = None,
+        mujoco_assets: dict[str, bytes] | None = None,
+    ) -> None:
+        """The initialization method.
+
+        :param movement: The FreeFlightMovement that defines the prescribed Airplane
+            geometry for this FreeFlightUnsteadyProblem. The initial Airplane and
+            OperatingPoint are derived from the FreeFlightMovement at the first time
+            step. The FreeFlightMovement must contain exactly one AirplaneMovement;
+            multi-airplane free flight is not supported in this release.
+        :param mass: A number (int or float) representing the mass of the Airplane. It
+            must be greater than zero and will be converted internally to a float. The
+            units are in kilograms. It must satisfy weight == mass * |g_E| within
+            floating point tolerance, where weight is the Airplane's weight and g_E is
+            the OperatingPoint's gravitational acceleration, which keeps the Airplane's
+            weight, the supplied mass, and the gravitational field mutually consistent.
+        :param I_BP1_CgP1: An array-like object of numbers (int or float) with shape
+            (3,3) representing the inertia matrix of the Airplane (in the first
+            Airplane's body axes, relative to the first Airplane's CG). It must be
+            symmetric. Can be a tuple, list, or ndarray. Values are converted to floats
+            internally. The units are in kilogram square meters.
+        :param external_loads_fn: A callable that computes additional forces and moments
+            to apply to the Airplane during the simulation. It takes an OperatingPoint
+            and an Airplane and returns a tuple of two (3,) ndarrays of floats: the
+            additional force (in wind axes, in Newtons) and the additional moment (in
+            wind axes, relative to the first Airplane's CG, in Newton meters). The
+            return value is validated on the callable's first invocation; a return that
+            is not a pair of (3,) finite numeric vectors raises a descriptive error. The
+            physical correctness of the forces and moments themselves is not checked.
+            Setting this to None applies no additional loads. The default is None. This
+            is the only mechanism for non-aerodynamic loads in free flight: the
+            OperatingPoint's externalFX_W is never applied and must be zero.
+        :param k_max: An int giving the maximum number of strongly coupled sub-
+            iterations per free-flight time step. Each time step drives the aerodynamic
+            loads and the rigid body state to mutual consistency with an Aitken-relaxed
+            fixed-point sub-iteration; this caps the iterations spent before the step is
+            accepted. A step that reaches the cap without converging is accepted anyway,
+            with a warning. It must be greater than zero and will be converted
+            internally to an int. Raising it trades more work per step for a tighter
+            solve when convergence is slow, which can happen for a very light vehicle (a
+            large added-mass ratio). The default is 20.
+        :param integrator: A str naming the MuJoCo integrator used to advance the rigid
+            body dynamics. It must be one of "Euler", "RK4", "implicit", or
+            "implicitfast". The choice is baked into the generated MuJoCo model XML, so
+            it survives saving and loading. "RK4" is accurate for smooth dynamics but
+            handles contacts poorly, so runs with collision geometry (injected via
+            extra_xml) should prefer "implicit" or "implicitfast". The default is "RK4".
+        :param extra_xml: A dict mapping injection point names to XML fragment strings
+            to inject into the MuJoCo model's XML. Supported keys are "default",
+            "asset", "visual", "worldbody", and "body". Setting this to None injects no
+            extra XML. The default is None. The argument is checked to be a dict (or
+            None) whose keys are supported injection points and whose values are
+            strings; the XML fragments themselves are not validated, which is left to
+            MuJoCo, so this is an advanced-user parameter.
+        :param mujoco_assets: A dict mapping virtual filenames to their binary contents
+            for the MuJoCo model. Setting this to None provides no extra assets. The
+            default is None. The argument is checked to be a dict (or None) mapping
+            string filenames to bytes; whether a referenced asset is actually supplied
+            is left to MuJoCo, so this is an advanced-user parameter. A
+            FreeFlightUnsteadyProblem built with mujoco_assets cannot be saved: save()
+            raises, because the saved engine is rebuilt on load from the stored XML
+            alone, whose asset references would be unresolvable.
+        :return: None
+        """
+        if not isinstance(movement, free_flight_movement.FreeFlightMovement):
+            raise TypeError("movement must be a FreeFlightMovement.")
+
+        if len(movement.airplane_movements) != 1:
+            raise ValueError(
+                "movement must have exactly one AirplaneMovement. "
+                "Multi-airplane free flight is not supported in this release."
+            )
+
+        # Derive the initial Airplane and OperatingPoint from the FreeFlightMovement's
+        # first time step. SteadyProblem mutates each Panel's GP1_CgP1 attributes once,
+        # so the initial Airplane must be a fresh object; generate_airplane_at_time_step
+        # returns one.
+        initial_airplane_movement = movement.airplane_movements[0]
+        initial_airplane = initial_airplane_movement.generate_airplane_at_time_step(
+            step=0, delta_time=movement.delta_time
+        )
+        initial_operating_point = movement.operating_point_movement.operating_points[0]
+
+        super().__init__(
+            movement=movement,
+            initial_airplanes=[initial_airplane],
+            initial_operating_point=initial_operating_point,
+        )
+
+        I_BP1_CgP1 = _parameter_validation.m_by_n_number_arrayLike_return_float(
+            I_BP1_CgP1, "I_BP1_CgP1", 3, 3
+        )
+        if not np.allclose(I_BP1_CgP1, I_BP1_CgP1.T):
+            raise ValueError("I_BP1_CgP1 must be symmetric.")
+        self._I_BP1_CgP1 = I_BP1_CgP1
+        self._I_BP1_CgP1.flags.writeable = False
+
+        self._mass = _parameter_validation.number_in_range_return_float(
+            mass,
+            "mass",
+            min_val=0.0,
+            min_inclusive=False,
+        )
+
+        # The Airplane's weight, the supplied mass, and the gravitational field must be
+        # mutually consistent: weight == mass * |g_E|. The free-flight dynamics derive
+        # the gravitational force as mass * g_E, while the Airplane's weight is used
+        # elsewhere (for example by the trim functions), so a disagreement would be a
+        # silent modeling error. g_E is constant across the run, so checking the initial
+        # OperatingPoint suffices. A zero g_E (the default, no gravitational field)
+        # consistently requires a zero weight.
+        expected_weight = self._mass * float(
+            np.linalg.norm(initial_operating_point.g_E)
+        )
+        if not np.isclose(initial_airplane.weight, expected_weight):
+            raise ValueError(
+                "The Airplane's weight must equal mass * |g_E| within floating point "
+                f"tolerance: the Airplane's weight is {initial_airplane.weight} N, but "
+                f"mass * |g_E| is {expected_weight} N. Set the Airplane's weight, the "
+                "mass, and the OperatingPoint's g_E so they agree (for a zero-gravity "
+                "simulation, leave both g_E and the weight at zero)."
+            )
+
+        # The free-flight dynamics never apply externalFX_W: non-aerodynamic loads
+        # enter free flight only through external_loads_fn, which is strictly more
+        # capable (full force and moment, time varying). A nonzero value would be
+        # silently ignored, so raise instead.
+        if initial_operating_point.externalFX_W != 0.0:
+            raise ValueError(
+                "The OperatingPoint's externalFX_W must be zero for free flight. The "
+                "free-flight dynamics never apply externalFX_W; use external_loads_fn "
+                "to model thrust or other additional loads."
+            )
+
+        if external_loads_fn is not None and not callable(external_loads_fn):
+            raise TypeError("external_loads_fn must be callable or None.")
+        self._external_loads_fn = external_loads_fn
+
+        # Tracks whether the external_loads_fn's return structure has been validated.
+        # The return contract is static across time steps, so it is checked once, on the
+        # function's first invocation in initialize_next_problem, rather than every step.
+        self._external_loads_validated = False
+
+        # The cap on the strongly coupled sub-iteration count per free-flight time step.
+        # The remaining sub-iteration tunables stay module constants by design (they are
+        # universal dimensionless constants), so the cap is the only one exposed.
+        self._k_max = _parameter_validation.int_in_range_return_int(
+            k_max,
+            "k_max",
+            min_val=0,
+            min_inclusive=False,
+        )
+
+        # Validate the integrator name against the supported MuJoCo integrators. The
+        # MuJoCoModel sets the validated name in the generated model XML's option
+        # element, so the choice survives saving and loading.
+        integrator = _parameter_validation.str_return_str(integrator, "integrator")
+        if integrator not in _MUJOCO_INTEGRATORS:
+            raise ValueError(
+                f"integrator '{integrator}' is not a supported MuJoCo integrator; "
+                f"expected one of {sorted(_MUJOCO_INTEGRATORS)}."
+            )
+
+        # Validate the extra_xml injection-point dict (it must be a dict, or None, whose
+        # keys are permitted injection points and whose values are XML fragment strings)
+        # and rebuild it from the validated values. Deeper XML correctness is left to
+        # MuJoCo's own parser. The integrator, extra_xml, and mujoco_assets arguments
+        # are the only raw user input forwarded to the MuJoCoModel, which performs no
+        # validation of its own.
+        if extra_xml is not None:
+            if not isinstance(extra_xml, dict):
+                raise TypeError("extra_xml must be a dict or None.")
+            validated_extra_xml: dict[str, str] = {}
+            for key, value in extra_xml.items():
+                if key not in _EXTRA_XML_INJECTION_POINTS:
+                    raise ValueError(
+                        f"extra_xml key '{key}' is not a permitted injection point; "
+                        f"expected one of {sorted(_EXTRA_XML_INJECTION_POINTS)}."
+                    )
+                validated_extra_xml[key] = _parameter_validation.str_return_str(
+                    value, f"extra_xml['{key}']"
+                )
+            extra_xml = validated_extra_xml
+
+        # Validate the mujoco_assets dict (it must be a dict, or None, mapping str
+        # filenames to bytes). Whether a referenced asset is actually supplied is left to
+        # MuJoCo's own parser.
+        if mujoco_assets is not None:
+            if not isinstance(mujoco_assets, dict):
+                raise TypeError("mujoco_assets must be a dict or None.")
+            for filename, contents in mujoco_assets.items():
+                if not isinstance(filename, str):
+                    raise TypeError(
+                        "mujoco_assets keys must be str filenames, not "
+                        f"{type(filename).__name__}."
+                    )
+                if not isinstance(contents, bytes):
+                    raise TypeError(
+                        f"mujoco_assets['{filename}'] must be bytes, not "
+                        f"{type(contents).__name__}."
+                    )
+
+        self._mujoco_model = _mujoco_model.MuJoCoModel(
+            name=initial_airplane.name,
+            mass=self._mass,
+            omegas_BP1__E=initial_operating_point.omegas_BP1__E,
+            T_pas_BP1_CgP1_to_E_CgP1=initial_operating_point.T_pas_BP1_CgP1_to_E_CgP1,
+            vCg_E__E=-1
+            * _transformations.apply_T_to_vectors(
+                initial_operating_point.T_pas_GP1_CgP1_to_E_CgP1,
+                initial_operating_point.vInf_GP1__E,
+                is_position=False,
+            ),
+            I_BP1_CgP1=self._I_BP1_CgP1,
+            delta_time=movement.delta_time,
+            integrator=integrator,
+            extra_xml=extra_xml,
+            mujoco_assets=mujoco_assets,
+        )
+
+    # --- Immutable: read only properties ---
+    @property
+    def I_BP1_CgP1(self) -> np.ndarray:
+        return self._I_BP1_CgP1
+
+    @property
+    def mass(self) -> float:
+        return self._mass
+
+    @property
+    def k_max(self) -> int:
+        return self._k_max
+
+    @property
+    def external_loads_fn(
+        self,
+    ) -> (
+        Callable[
+            [
+                operating_point_mod.OperatingPoint,
+                geometry.airplane.Airplane,
+            ],
+            tuple[np.ndarray, np.ndarray],
+        ]
+        | None
+    ):
+        return self._external_loads_fn
+
+    @property
+    def _free_flight_movement(self) -> free_flight_movement.FreeFlightMovement:
+        """Type narrowed view of the inherited _movement attribute.
+
+        The parent stores _movement as a CoreMovement (widened to let subclasses pass
+        their own variants). __init__ accepts only a FreeFlightMovement, so the cast
+        here is safe.
+
+        :return: The _movement narrowed to FreeFlightMovement.
+        """
+        return cast(free_flight_movement.FreeFlightMovement, self._movement)
+
+    @staticmethod
+    def _validate_external_loads_return(result: object) -> None:
+        """Validates the structure of a value returned by the external_loads_fn.
+
+        The external_loads_fn must return a (force, moment) pair, where each is a (3,)
+        array-like of finite numbers (the force in wind axes in Newtons, the moment in
+        wind axes relative to the first Airplane's CG in Newton meters). This checks
+        only the shape and finiteness of the return value, not the physical correctness
+        of the forces and moments, which cannot be validated in general. It is called
+        once, on the external_loads_fn's first invocation, because the return contract
+        is static across time steps.
+
+        :param result: The object returned by a call to the external_loads_fn.
+        :return: None
+        """
+        if not isinstance(result, (tuple, list, np.ndarray)):
+            raise TypeError(
+                "external_loads_fn must return a (force, moment) pair as a tuple, "
+                f"list, or ndarray, but got {type(result).__name__}."
+            )
+        if len(result) != 2:
+            raise ValueError(
+                "external_loads_fn must return a (force, moment) pair, but its return "
+                f"value had {len(result)} items."
+            )
+
+        # Each component must be a (3,) vector of finite numbers. Defer the shape,
+        # finiteness, and numeric-type checks to the package's standard validator.
+        _parameter_validation.threeD_number_vectorLike_return_float(
+            result[0], "external_loads_fn's returned force"
+        )
+        _parameter_validation.threeD_number_vectorLike_return_float(
+            result[1], "external_loads_fn's returned moment"
+        )
+
+    def _assemble_interval_loads(
+        self,
+        operating_point: operating_point_mod.OperatingPoint,
+        airplane: geometry.airplane.Airplane,
+        step: int,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Assembles the Earth-axes interval load to apply over the next time step.
+
+        In the free flight phase, returns the total force and moment (in Earth axes,
+        relative to the first Airplane's CG) to apply to the MuJoCo model: the
+        aerodynamic loads plus any external loads, transformed from wind axes to Earth
+        axes, with the weight added. In the prescribed phase, returns None so the loads
+        are withheld and the body coasts at its initial trimmed condition (MuJoCo's
+        internal gravity is off and weight is applied through the loads, so withholding
+        them leaves zero net force and the body keeps its initial velocity and
+        orientation), letting the wake develop at a steady operating condition before
+        the rigid body dynamics are released. The external_loads_fn is still invoked
+        once, on the first step, so its return structure is validated fail-fast rather
+        than only when the free flight phase begins.
+
+        :param operating_point: The OperatingPoint at which the loads are evaluated.
+        :param airplane: The first Airplane, carrying the aerodynamic loads the solver
+            calculated at this operating point.
+        :param step: The current time step index (zero indexed).
+        :return: A tuple of two (3,) ndarrays of floats representing the total force and
+            moment (in Earth axes, relative to the first Airplane's CG) to apply, in
+            Newtons and Newton meters, or None to withhold the loads in the prescribed
+            phase.
+        """
+        in_free_phase = step >= self._free_flight_movement.prescribed_num_steps
+
+        if not in_free_phase:
+            # In the prescribed phase the loads are withheld, but the external_loads_fn
+            # is still invoked once, on the first step, so its return structure is
+            # validated fail-fast rather than only when the free flight phase begins.
+            if (
+                step == 0
+                and self._external_loads_fn is not None
+                and not self._external_loads_validated
+            ):
+                self._validate_external_loads_return(
+                    self._external_loads_fn(operating_point, airplane)
+                )
+                self._external_loads_validated = True
+            return None
+
+        aeroForces_W = airplane.forces_W
+        assert aeroForces_W is not None
+        aeroMoments_W_CgP1 = airplane.moments_W_CgP1
+        assert aeroMoments_W_CgP1 is not None
+
+        # Start from the aerodynamic loads and add any external loads from the
+        # external_loads_fn.
+        if self._external_loads_fn is not None:
+            external_result = self._external_loads_fn(operating_point, airplane)
+            # Validate the return structure once, on the first invocation.
+            if not self._external_loads_validated:
+                self._validate_external_loads_return(external_result)
+                self._external_loads_validated = True
+            externalForces_W, externalMoments_W_CgP1 = external_result
+            totalForces_W = aeroForces_W + externalForces_W
+            totalMoments_W_CgP1 = aeroMoments_W_CgP1 + externalMoments_W_CgP1
+        else:
+            totalForces_W = aeroForces_W
+            totalMoments_W_CgP1 = aeroMoments_W_CgP1
+
+        # Transform loads from wind axes to Earth axes.
+        T_pas_W_CgP1_to_E_CgP1 = operating_point.T_pas_W_CgP1_to_E_CgP1
+        totalForces_E = _transformations.apply_T_to_vectors(
+            T_pas_W_CgP1_to_E_CgP1, totalForces_W, is_position=False
+        )
+        totalMoments_E_CgP1 = _transformations.apply_T_to_vectors(
+            T_pas_W_CgP1_to_E_CgP1, totalMoments_W_CgP1, is_position=False
+        )
+
+        # Add the weight force in Earth axes. The gravitational force is mass * g_E,
+        # which is zero when g_E is zero (no gravitational field).
+        totalForces_E = totalForces_E + self._mass * operating_point.g_E
+
+        return totalForces_E, totalMoments_E_CgP1
+
+    def _advance_body(
+        self, interval_loads_E: tuple[np.ndarray, np.ndarray] | None
+    ) -> _mujoco_model.MuJoCoState:
+        """Applies the interval load (if any) and steps the dynamics, returning the new
+        state.
+
+        Applies the given Earth-axes force and moment to the MuJoCo model, steps the
+        rigid body dynamics forward by one time step, and returns the new state. When
+        the load is None (the prescribed phase) no load is applied and the body coasts.
+        The MuJoCo model is stepped from its current state; restoring it to a frozen
+        snapshot, when re-stepping within a strongly coupled sub-iteration, is the
+        caller's responsibility.
+
+        :param interval_loads_E: A tuple of two (3,) ndarrays of floats representing the
+            force and moment (in Earth axes, relative to the first Airplane's CG) to
+            apply over the interval, in Newtons and Newton meters, or None to apply no
+            load.
+        :return: The MuJoCo model's state after the step, as returned by
+            MuJoCoModel.get_state.
+        """
+        if interval_loads_E is not None:
+            forces_E, moments_E_CgP1 = interval_loads_E
+            self._mujoco_model.apply_loads(forces_E, moments_E_CgP1)
+        self._mujoco_model.step()
+
+        return self._mujoco_model.get_state()
+
+    def _operating_point_from_state(
+        self,
+        state: _mujoco_model.MuJoCoState,
+        reference_operating_point: operating_point_mod.OperatingPoint,
+    ) -> operating_point_mod.OperatingPoint:
+        """Builds the next OperatingPoint from a MuJoCo state.
+
+        Derives the speed, angle of attack, sideslip angle, and Earth-to-body Euler
+        angles from the rigid body state, and carries the environmental quantities
+        (fluid density, surface geometry, external force, kinematic viscosity, and
+        gravity) across from the reference OperatingPoint unchanged.
+
+        :param state: A MuJoCo state, as returned by MuJoCoModel.get_state.
+        :param reference_operating_point: The current OperatingPoint, whose
+            environmental quantities are carried across to the new OperatingPoint.
+        :return: The OperatingPoint describing the new rigid body state.
+        """
+        angles_E_to_BP1_izyx = _transformations.R_to_angles_izyx(
+            state["R_pas_E_to_BP1"]
+        )
+
+        return self._build_next_operating_point(
+            position_E_Eo=state["position_E_Eo"],
+            angles_E_to_BP1_izyx=angles_E_to_BP1_izyx,
+            velocity_E__E=state["velocity_E__E"],
+            omegas_BP1__E=state["omegas_BP1__E"],
+            reference_operating_point=reference_operating_point,
+        )
+
+    def _operating_point_from_vector(
+        self,
+        x: np.ndarray,
+        reference_operating_point: operating_point_mod.OperatingPoint,
+    ) -> operating_point_mod.OperatingPoint:
+        """Builds the next OperatingPoint from a rigid body state 12-vector.
+
+        The 12-vector is a relaxed trial state of the sub-iteration, expressed in Earth
+        axes with angular quantities in radians (see _state_to_vector). Unlike a MuJoCo
+        state, a relaxed trial state need not correspond to any state MuJoCo produced,
+        so the OperatingPoint is built from the 12-vector directly. The attitude is
+        converted from radians to degrees and the angular rate is rotated from Earth
+        axes back into the first Airplane's body axes and converted to degrees per
+        second, the form the OperatingPoint expects.
+
+        :param x: A (12,) ndarray of floats representing the rigid body state 12-vector,
+            as produced by _state_to_vector.
+        :param reference_operating_point: The current OperatingPoint, whose
+            environmental quantities are carried across to the new OperatingPoint.
+        :return: The OperatingPoint describing the trial rigid body state.
+        """
+        position_E_Eo = x[0:3]
+        anglesRad_E_to_BP1_izyx = x[3:6]
+        velocity_E__E = x[6:9]
+        omegasRad_E__E = x[9:12]
+
+        angles_E_to_BP1_izyx = np.rad2deg(anglesRad_E_to_BP1_izyx)
+
+        # Rotate the angular rate from Earth axes back into the first Airplane's body
+        # axes and convert to degrees per second for the OperatingPoint.
+        T_pas_E_CgP1_to_BP1_CgP1 = _transformations.generate_rot_T(
+            angles=angles_E_to_BP1_izyx,
+            passive=True,
+            intrinsic=True,
+            order="zyx",
+        )
+        omegas_BP1__E = np.rad2deg(
+            _transformations.apply_T_to_vectors(
+                T_pas_E_CgP1_to_BP1_CgP1, omegasRad_E__E, is_position=False
+            )
+        )
+
+        return self._build_next_operating_point(
+            position_E_Eo=position_E_Eo,
+            angles_E_to_BP1_izyx=angles_E_to_BP1_izyx,
+            velocity_E__E=velocity_E__E,
+            omegas_BP1__E=omegas_BP1__E,
+            reference_operating_point=reference_operating_point,
+        )
+
+    @staticmethod
+    def _build_next_operating_point(
+        position_E_Eo: np.ndarray,
+        angles_E_to_BP1_izyx: np.ndarray,
+        velocity_E__E: np.ndarray,
+        omegas_BP1__E: np.ndarray,
+        reference_operating_point: operating_point_mod.OperatingPoint,
+    ) -> operating_point_mod.OperatingPoint:
+        """Builds the next OperatingPoint from already-extracted rigid body components.
+
+        Derives the speed, angle of attack, and sideslip angle from the velocity and
+        attitude, and carries the environmental quantities (fluid density, surface
+        geometry, external force, kinematic viscosity, and gravity) across from the
+        reference OperatingPoint unchanged. The attitude and angular rate are supplied
+        in the form the OperatingPoint expects: the intrinsic zyx Euler angles from
+        Earth axes to the first Airplane's body axes in degrees, and the body angular
+        rate in the first Airplane's body axes in degrees per second.
+
+        :param position_E_Eo: A (3,) ndarray of floats representing the first Airplane's
+            CG position (in Earth axes, relative to the Earth origin) in meters.
+        :param angles_E_to_BP1_izyx: A (3,) ndarray of floats representing the intrinsic
+            zyx Euler angles from Earth axes to the first Airplane's body axes, in
+            degrees.
+        :param velocity_E__E: A (3,) ndarray of floats representing the first Airplane's
+            CG velocity (in Earth axes, observed from the Earth frame) in meters per
+            second.
+        :param omegas_BP1__E: A (3,) ndarray of floats representing the body angular
+            rate (in the first Airplane's body axes, observed from the Earth frame) in
+            degrees per second.
+        :param reference_operating_point: The current OperatingPoint, whose
+            environmental quantities are carried across to the new OperatingPoint.
+        :return: The OperatingPoint describing the new rigid body state.
+        """
+        vCg__E = float(np.linalg.norm(velocity_E__E))
+        T_pas_E_CgP1_to_BP1_CgP1 = _transformations.generate_rot_T(
+            angles=angles_E_to_BP1_izyx,
+            passive=True,
+            intrinsic=True,
+            order="zyx",
+        )
+        vInf_E__E = -velocity_E__E
+        vInf_BP1__E = _transformations.apply_T_to_vectors(
+            T_pas_E_CgP1_to_BP1_CgP1, vInf_E__E, is_position=False
+        )
+        alpha, beta = _transformations.alpha_and_beta_from_vInf_BP1(vInf_BP1__E, vCg__E)
+
+        return operating_point_mod.OperatingPoint(
+            rho=reference_operating_point.rho,
+            vCg__E=vCg__E,
+            alpha=alpha,
+            beta=beta,
+            angles_E_to_BP1_izyx=angles_E_to_BP1_izyx,
+            CgP1_E_Eo=position_E_Eo,
+            surfaceNormal_E=reference_operating_point.surfaceNormal_E,
+            surfacePoint_E_Eo=reference_operating_point.surfacePoint_E_Eo,
+            externalFX_W=reference_operating_point.externalFX_W,
+            nu=reference_operating_point.nu,
+            g_E=reference_operating_point.g_E,
+            omegas_BP1__E=omegas_BP1__E,
+        )
+
+    @staticmethod
+    def _state_to_vector(state: _mujoco_model.MuJoCoState) -> np.ndarray:
+        """Converts a MuJoCo state to the rigid body state 12-vector.
+
+        The 12-vector concatenates the four blocks of the rigid body state, all
+        expressed in Earth axes with angular quantities in radians, so the sub-
+        iteration's residuals and updates are plain vector arithmetic: the CG position
+        (relative to the Earth origin, in meters), the intrinsic zyx Euler angles from
+        Earth axes to the first Airplane's body axes (in radians), the CG velocity
+        (observed from the Earth frame, in meters per second), and the body angular rate
+        (observed from the Earth frame, in radians per second). The MuJoCo state carries
+        the attitude as an orientation matrix and the angular rate in the first
+        Airplane's body axes in degrees per second, so this method extracts the Euler
+        angles, rotates the rate into Earth axes, and converts both angular quantities
+        to radians.
+
+        :param state: A MuJoCo state, as returned by MuJoCoModel.get_state.
+        :return: A (12,) ndarray of floats representing the rigid body state 12-vector.
+        """
+        R_pas_E_to_BP1 = state["R_pas_E_to_BP1"]
+
+        position_E_Eo = state["position_E_Eo"]
+        anglesRad_E_to_BP1_izyx = np.deg2rad(
+            _transformations.R_to_angles_izyx(R_pas_E_to_BP1)
+        )
+        velocity_E__E = state["velocity_E__E"]
+        # Rotate the angular rate from the first Airplane's body axes into Earth axes
+        # (v_E = R_pas_E_to_BP1.T @ v_BP1, a proper rotation that preserves the axial-
+        # vector sign) and convert to radians per second.
+        omegasRad_E__E = R_pas_E_to_BP1.T @ np.deg2rad(state["omegas_BP1__E"])
+
+        return np.concatenate(
+            [position_E_Eo, anglesRad_E_to_BP1_izyx, velocity_E__E, omegasRad_E__E]
+        )
+
+    def _build_relaxation_weights(self) -> np.ndarray:
+        """Builds the diagonal of the sub-iteration weighting matrix D.
+
+        D nondimensionalizes the rigid body state 12-vector so the convergence test and
+        the Aitken inner products combine its four blocks (position, attitude, velocity,
+        and angular rate) on a common scale despite their differing units and their
+        differing powers of the time step under a load perturbation. It is diagonal and
+        block constant, ordered like the state as (position, attitude, velocity, angular
+        rate):
+
+            D = diag( (1 / L_ref) I3, (1 / theta_ref) I3,
+                      (delta_time / L_ref) I3, (delta_time / theta_ref) I3 )
+
+        The reference length L_ref is the first Airplane's reference chord. The reference
+        angle theta_ref is mass * L_ref**2 / I_bar, with I_bar the mean of the body
+        inertia's principal moments (one third of its trace), a rotation invariant chosen
+        so D stays constant as the body reorients. The delta_time factors on the velocity
+        and angular-rate blocks convert a rate into the increment it produces over one
+        step, lifting those blocks to match the configuration blocks. All inputs are
+        fixed for a run, so D is constant.
+
+        :return: A (12,) ndarray of floats representing the diagonal of the weighting
+            matrix D.
+        """
+        airplane = self._free_flight_movement.airplanes[0][0]
+        L_ref = airplane.c_ref
+        assert L_ref is not None
+
+        mean_inertia = float(np.trace(self._I_BP1_CgP1)) / 3.0
+        theta_ref = self._mass * L_ref**2 / mean_inertia
+
+        delta_time = self.delta_time
+
+        return np.concatenate(
+            [
+                np.full(3, 1.0 / L_ref),
+                np.full(3, 1.0 / theta_ref),
+                np.full(3, delta_time / L_ref),
+                np.full(3, delta_time / theta_ref),
+            ]
+        )
+
+    def _commit_next_problem(
+        self,
+        next_operating_point: operating_point_mod.OperatingPoint,
+        step: int,
+    ) -> None:
+        """Commits the next time step's OperatingPoint and SteadyProblem.
+
+        Appends the new OperatingPoint to the operating point movement's history and
+        appends the next SteadyProblem (the prescribed Airplane geometry for the next
+        step paired with the new OperatingPoint) to the problem's steady problems. These
+        are the once-per-time-step side effects of advancing to the next step.
+
+        :param next_operating_point: The OperatingPoint for the next time step.
+        :param step: The current time step index (zero indexed).
+        :return: None
+        """
+        self._free_flight_movement.operating_point_movement.operating_points.append(
+            next_operating_point
+        )
+
+        next_airplane = self._free_flight_movement.airplanes[0][step + 1]
+
+        next_steady_problem = SteadyProblem(
+            airplanes=[next_airplane],
+            operating_point=next_operating_point,
+        )
+        self._steady_problems.append(next_steady_problem)
+
+    def _advance_strongly_coupled(
+        self,
+        solver: FreeFlightUnsteadyRingVortexLatticeMethodSolver,
+        current_airplane: geometry.airplane.Airplane,
+        current_operating_point: operating_point_mod.OperatingPoint,
+        step: int,
+    ) -> None:
+        """Advances the body to the next step by the strongly coupled sub-iteration.
+
+        Within one free flight time step, drives the aerodynamic loads and the rigid
+        body state to mutual consistency by an Aitken-relaxed fixed-point iteration on
+        the rigid body state 12-vector. The snapshot MuJoCo state and the solver's
+        frozen step data are saved once. Each iteration evaluates the aerodynamic loads
+        at the current trial state, integrates the body from the snapshot under those
+        loads, and relaxes the trial state toward the dynamics-propagated state until
+        the weighted residual passes the convergence test or the iteration cap is
+        reached. The accepted state is the final dynamics-propagated state (a genuine
+        MuJoCo trajectory output), and its OperatingPoint is committed as the next
+        step's. The solver's current-step state is then restored for the inherited run
+        loop's official wake build.
+
+        :param solver: The FreeFlightUnsteadyRingVortexLatticeMethodSolver providing the
+            aerodynamic evaluation at each trial state.
+        :param current_airplane: The first Airplane at the current step, carrying the
+            current step's solved aerodynamic loads, used to seed the iteration.
+        :param current_operating_point: The current step's OperatingPoint, the reference
+            for the environmental quantities carried into each trial OperatingPoint.
+        :param step: The current time step index (zero indexed).
+        :return: None
+        """
+        # Freeze: snapshot the MuJoCo state and the current step's state 12-vector while
+        # the model is still at it, the solver's frozen step data, and the weighting.
+        # Build the transient next-step SteadyProblem over a scratch copy of the
+        # prescribed next-step Airplane, so the trials evaluate aerodynamics on the copy
+        # and the canonical Airplane's set-once panel coordinates are reserved for the
+        # official SteadyProblem committed once the solve accepts. Its OperatingPoint is a
+        # placeholder; the trial OperatingPoint is supplied to each trial.
+        snapshot = self._mujoco_model.save_state()
+        snapshot_x = self._state_to_vector(self._mujoco_model.get_state())
+        next_airplane = self._free_flight_movement.airplanes[0][step + 1]
+        transient_next_steady_problem = SteadyProblem(
+            airplanes=[copy.deepcopy(next_airplane)],
+            operating_point=current_operating_point,
+        )
+        solver.freeze_substep(transient_next_steady_problem)
+        weights = self._build_relaxation_weights()
+
+        # Seed the iteration with the loose step, S(x_n, l_n), evaluated from the snapshot.
+        snapshot_interval_loads = self._assemble_interval_loads(
+            current_operating_point, current_airplane, step
+        )
+        trial_x = self._state_to_vector(self._advance_body(snapshot_interval_loads))
+
+        relaxation_factor = _SUBITERATION_INITIAL_RELAXATION_FACTOR
+        previous_residual: np.ndarray | None = None
+        residual_norm = 0.0
+        converged = False
+
+        for iteration in range(self.k_max + 1):
+            # Aerodynamic loads at the trial state: build the trial OperatingPoint,
+            # evaluate the aerodynamics at it, and assemble the Earth-axes interval load.
+            trial_operating_point = self._operating_point_from_vector(
+                trial_x, current_operating_point
+            )
+            trial_airplane = solver.evaluate_trial_aero_loads(
+                trial_operating_point, step
+            )
+            interval_loads = self._assemble_interval_loads(
+                trial_operating_point, trial_airplane, step
+            )
+
+            # Integrate the body from the snapshot under the trial load.
+            self._mujoco_model.restore_state(snapshot)
+            propagated_x = self._state_to_vector(self._advance_body(interval_loads))
+
+            residual = propagated_x - trial_x
+            increment = trial_x - snapshot_x
+            residual_norm = _fixed_point_relaxation.weighted_norm(weights, residual)
+
+            # The relaxation factor applied this iteration: the initial factor on the
+            # first iteration, the Aitken factor thereafter.
+            if iteration > 0:
+                assert previous_residual is not None
+                relaxation_factor = _fixed_point_relaxation.aitken_relaxation_factor(
+                    weights,
+                    residual,
+                    previous_residual,
+                    relaxation_factor,
+                    _SUBITERATION_INITIAL_RELAXATION_FACTOR,
+                    _SUBITERATION_DIVERGENCE_TOLERANCE,
+                )
+
+            _logger.debug(
+                _logging.indent()
+                + "Free flight step %d, sub-iteration %d: weighted residual norm "
+                "%#.3G, relaxation factor %#.3G",
+                step,
+                iteration,
+                residual_norm,
+                relaxation_factor,
+            )
+
+            if _fixed_point_relaxation.is_converged(
+                weights,
+                residual,
+                increment,
+                _SUBITERATION_RELATIVE_TOLERANCE,
+                _SUBITERATION_ABSOLUTE_TOLERANCE,
+            ):
+                converged = True
+                break
+
+            if iteration == self.k_max:
+                break
+
+            trial_x = trial_x + relaxation_factor * residual
+            previous_residual = residual
+
+        if not converged:
+            _logger.warning(
+                _logging.indent()
+                + "Free flight sub-iteration at step %d reached the %d-iteration "
+                "cap without converging",
+                step,
+                self.k_max,
+            )
+            _logger.warning(
+                _logging.indent()
+                + "Accepting the capped iterate with weighted residual norm %#.3G",
+                residual_norm,
+            )
+
+        # Accept: the final dynamics-propagated state, at which the model now sits, is the
+        # next step's state. Commit its OperatingPoint, then restore the solver's current-
+        # step state for the official wake build in the inherited run loop.
+        accepted_operating_point = self._operating_point_from_state(
+            self._mujoco_model.get_state(), current_operating_point
+        )
+        self._commit_next_problem(accepted_operating_point, step)
+        solver.restore_substep(step)
+
+    def initialize_next_problem(
+        self,
+        solver: CoupledUnsteadyRingVortexLatticeMethodSolver,
+        step: int,
+    ) -> None:
+        """Initializes the next time step's SteadyProblem from rigid body dynamics.
+
+        On every step except the last one, advances the MuJoCo dynamics and creates the
+        next SteadyProblem with the new OperatingPoint and the prescribed Airplane
+        geometry for the next step. During the prescribed phase, the loads are withheld
+        so the body coasts at its initial trimmed condition while the wake develops, and
+        the body advances once. During the free flight phase (once the step index
+        reaches the movement's prescribed_num_steps), the aerodynamic loads and the
+        rigid body state are driven to mutual consistency by the strongly coupled sub-
+        iteration before the next step is committed.
+
+        :param solver: The CoupledUnsteadyRingVortexLatticeMethodSolver instance
+            providing aerodynamic data from the current time step.
+        :param step: The current time step index (zero indexed).
+        :return: None
+        """
+        current_airplane = solver.current_airplanes[0]
+        current_operating_point = solver.current_operating_point
+
+        if step < self.num_steps - 1:
+            if step >= self._free_flight_movement.prescribed_num_steps:
+                # Free flight phase: drive the loads and the body state to mutual
+                # consistency before committing the next step.
+                self._advance_strongly_coupled(
+                    cast(
+                        "FreeFlightUnsteadyRingVortexLatticeMethodSolver",
+                        solver,
+                    ),
+                    current_airplane,
+                    current_operating_point,
+                    step,
+                )
+            else:
+                # Prescribed phase: the loads are withheld, so the body coasts at its
+                # trimmed condition while the wake develops. Advance once and commit the
+                # next step's SteadyProblem from the new state.
+                interval_loads_E = self._assemble_interval_loads(
+                    current_operating_point, current_airplane, step
+                )
+                new_state = self._advance_body(interval_loads_E)
+                next_operating_point = self._operating_point_from_state(
+                    new_state, current_operating_point
+                )
+                self._commit_next_problem(next_operating_point, step)
+
+
+# Aeroelastic structural-coupling debug constants. _AERO_SCALING multiplies the
+# aerodynamic moments fed to the torsional spring-damper ODE, and
+# _DEFORMATION_SCALING multiplies the torsional deformation angles applied to the
+# geometry. Both are fixed at 1.0 so the coupling is physical; change them only for
+# local debugging. A value other than 1.0 shifts the converged equilibrium (for
+# example, a static twist becomes _AERO_SCALING * M / k) rather than stabilizing the
+# coupling.
+_AERO_SCALING = 1.0
+_DEFORMATION_SCALING = 1.0
+
+# Tolerances for the torsional spring-damper ODE integration in
+# spring_numerical_ode. They are a few orders of magnitude stricter than scipy's
+# defaults because the integration is re-seeded from the previous state at every
+# outer time step, so its local errors compound across a simulation, and because a
+# loose absolute tolerance would swamp small torsional responses. The absolute
+# tolerance bounds both state components, the torsional angle (radians) and the
+# angular velocity (rad/s). Loosen these only for local debugging (for example, a
+# nearly massless wing makes the ODE stiff and the strict tolerances expensive).
+_SPRING_ODE_RELATIVE_TOLERANCE = 1e-6
+_SPRING_ODE_ABSOLUTE_TOLERANCE = 1e-9
+
+
+class AeroelasticUnsteadyProblem(_CoupledUnsteadyProblem):
+    """A subclass of _CoupledUnsteadyProblem used to couple aeroelastic wing
+    deformations with unsteady aerodynamics.
+
+    This class couples aerodynamic loads with wing structural dynamics (spring-mass-
+    damper system) to simulate aeroelastic deformation. Each time step, wing
+    deformations are calculated based on the combined effects of aerodynamic moments,
+    inertial forces, and spring-damper restoring forces.
+
+    **Contains the following methods:**
+
+    calculate_wing_panel_accelerations: Computes panel accelerations from finite
+    difference of positions.
+
+    calculate_mass_matrix: Generates the mass distribution matrix for wing panels.
+
+    calculate_wing_deformation: Computes cumulative wing deformation for the current
+    step.
+
+    calculate_spring_moments: Solves the torsional spring-damper ODE for each spanwise
+    section, returning angular states.
+
+    calculate_torsional_spring_moment: Solves the torsional spring-damper ODE for a
+    single span section.
+
+    generate_inertial_torque_function: Creates a torque function from prescribed wing
+    motion.
+
+    spring_numerical_ode: Numerically integrates the spring-damper differential
+    equation.
+
+    plot_flap_cycle_curves: Visualizes moment and deformation time histories.
+
+    **Notes:**
+
+    The aeroelastic coupling assumes a torsional spring-mass-damper model for each
+    spanwise section. Wing motion is prescribed through wing flapping, and aerodynamic
+    moments from the solver are combined with inertial and spring restoring forces via
+    ODE integration to produce structural deformations.
+    """
+
+    __slots__ = (
+        "_wing_density",
+        "_spring_constant",
+        "_damping_constant",
+        "_step_discards",
+        "_plot_flap_cycle",
+        "net_deformation_per_wing",
+        "angular_velocities_per_wing",
+        "positions_per_wing",
+        "per_step_inertial_per_wing",
+        "per_step_aero_per_wing",
+        "net_data_per_wing",
+        "angular_velocity_data_per_wing",
+        "flap_points_per_wing",
+        "base_wing_positions_per_wing",
+    )
+
+    def __init__(
+        self,
+        movement: aeroelastic_movement_mod.AeroelasticMovement,
+        wing_density: float,
+        spring_constant: float,
+        damping_constant: float,
+        step_discards: int = 5,
+        plot_flap_cycle: bool = False,
+    ) -> None:
+        """The initialization method.
+
+        Sets up the aeroelastic problem with structural parameters for the torsional
+        spring-mass-damper model applied to each wing spanwise section. Initializes
+        storage for aerodynamic loads, deformations, moments, and solver state.
+
+        See _CoupledUnsteadyProblem's initialization method for descriptions of
+        inherited parameters.
+
+        :param movement: An AeroelasticMovement object containing the prescribed motion
+            and aerodynamic setup for the aeroelastic simulation.
+        :param wing_density: The mass per unit span area of the wing (kg/m^2). Used to
+            distribute wing mass across panels for inertial calculations.
+        :param spring_constant: The torsional spring stiffness for the spring-mass-
+            damper model (N*m/rad). Controls the restoring torque opposing deformation.
+        :param damping_constant: The torsional damping coefficient (N*m*s/rad). Controls
+            the viscous damping in the spring-mass-damper system.
+        :param step_discards: The number of initial time steps to discard for numerical
+            stability (there are inconsistent startup effects from the UVLM solver).
+            During these steps, the solver will run but the results will not be applied
+            to the deformation of the wings. The default is 5.
+        :param plot_flap_cycle: If True, plots time histories of moments and
+            deformations at the end of the simulation. The default is False.
+        :return: None
+        """
+        if not isinstance(movement, aeroelastic_movement_mod.AeroelasticMovement):
+            raise TypeError("movement must be an AeroelasticMovement.")
+
+        # Generate the initial airplane at step 0 with no deformation.
+        initial_airplane = movement.generate_airplane_at_time_step(
+            airplane_movement_index=0, step=0
+        )
+
+        super().__init__(
+            movement=movement,
+            initial_airplanes=[initial_airplane],
+            initial_operating_point=movement.operating_points[0],
+        )
+
+        self._plot_flap_cycle = plot_flap_cycle
+
+        # Tunable Parameters
+        self._wing_density = wing_density  # per unit height kg/m^2
+        self._spring_constant = spring_constant
+        self._damping_constant = damping_constant
+
+        # Permanent parameters
+        self._step_discards = (
+            step_discards  # number of initial steps to discard for numerical stability
+        )
+
+        # Per-wing deformation state. Indexed as [wing_idx].
+        # Each element holds the current cumulative deformation angles for one wing.
+        # The y components are torsional angles in radians; the x and z components are
+        # zero.
+        self.net_deformation_per_wing: list[np.ndarray] = []
+        # Per-wing angular velocity state. Indexed as [wing_idx]. The y components are
+        # torsional angular velocities in rad/s; the x and z components are zero.
+        self.angular_velocities_per_wing: list[np.ndarray] = []
+        # Per-wing panel position history. Indexed as [wing_idx][step]. The positions
+        # are panel center points in meters.
+        self.positions_per_wing: list[list[np.ndarray]] = []
+        # Per-wing moment and deformation history. Indexed as [wing_idx][step]. The
+        # inertial and aerodynamic moments are in N*m, the net data snapshots hold
+        # torsional angles in radians in their y components, the angular velocity
+        # snapshots hold rad/s in their y components, and the flap points are position
+        # offsets in meters.
+        self.per_step_inertial_per_wing: list[list[np.ndarray]] = []
+        self.per_step_aero_per_wing: list[list[np.ndarray]] = []
+        self.net_data_per_wing: list[list[np.ndarray]] = []
+        self.angular_velocity_data_per_wing: list[list[np.ndarray]] = []
+        self.flap_points_per_wing: list[list[np.ndarray]] = []
+        # Per-wing undeformed baseline positions. Indexed as [wing_idx]. The positions
+        # are panel center points in meters.
+        self.base_wing_positions_per_wing: list[np.ndarray] = []
+
+        # Initialize per-wing state now that we have the initial airplane geometry.
+        self._initialize_per_wing_state(initial_airplane)
+
+    # --- Immutable: read only properties ---
+    @property
+    def _aeroelastic_movement(
+        self,
+    ) -> aeroelastic_movement_mod.AeroelasticMovement:
+        # The parent stores the movement as a CoreMovement in _movement. The constructor
+        # guarantees it is an AeroelasticMovement, so the cast here is safe.
+        return cast(
+            aeroelastic_movement_mod.AeroelasticMovement,
+            self._movement,
+        )
+
+    @property
+    def wing_movement(
+        self,
+    ) -> aeroelastic_wing_movement_mod.AeroelasticWingMovement:
+        """Return the primary wing movement definition used by the aeroelastic model."""
+        return cast(
+            aeroelastic_wing_movement_mod.AeroelasticWingMovement,
+            self._aeroelastic_movement.airplane_movements[0].wing_movements[0],
+        )
+
+    @property
+    def wing_density(self) -> float:
+        return self._wing_density
+
+    @property
+    def spring_constant(self) -> float:
+        return self._spring_constant
+
+    @property
+    def damping_constant(self) -> float:
+        return self._damping_constant
+
+    @property
+    def step_discards(self) -> int:
+        return self._step_discards
+
+    @property
+    def plot_flap_cycle(self) -> bool:
+        return self._plot_flap_cycle
+
+    def _initialize_per_wing_state(self, airplane: geometry.airplane.Airplane) -> None:
+        """Allocate per-wing state arrays sized to the airplane geometry.
+
+        Called once from __init__ after the initial airplane is generated. Iterates over
+        every Wing in the airplane and appends one entry per wing to each per-wing state
+        list. The deformation accumulator (net_deformation_per_wing) and the angular
+        velocity store (angular_velocities_per_wing) are each a zero-valued (N_span+1,
+        3) array whose y components carry the torsional angles (radians) and torsional
+        angular velocities (rad/s). The history lists start empty: positions_per_wing
+        holds panel center positions (meters), per_step_inertial_per_wing and
+        per_step_aero_per_wing hold inertial and aerodynamic moment arrays (N*m),
+        net_data_per_wing holds cumulative deformation snapshots (torsional angles in
+        radians in the y components), angular_velocity_data_per_wing holds angular
+        velocity snapshots (rad/s in the y components), and flap_points_per_wing holds
+        wing deflection offsets (meters). The undeformed baseline
+        (base_wing_positions_per_wing) starts as a zero-size array marking it as unset.
+
+        :param airplane: The initial Airplane whose Wings define the geometry.
+        :return: None
+        """
+        for wing in airplane.wings:
+            num_spanwise_panels = wing.num_spanwise_panels
+            assert num_spanwise_panels is not None
+            self.net_deformation_per_wing.append(
+                np.zeros((num_spanwise_panels + 1, 3), dtype=float)
+            )
+            self.angular_velocities_per_wing.append(
+                np.zeros((num_spanwise_panels + 1, 3), dtype=float)
+            )
+            self.positions_per_wing.append([])
+            self.per_step_inertial_per_wing.append([])
+            self.per_step_aero_per_wing.append([])
+            self.net_data_per_wing.append([])
+            self.angular_velocity_data_per_wing.append([])
+            self.flap_points_per_wing.append([])
+            self.base_wing_positions_per_wing.append(np.zeros(0, dtype=float))
+
+    def _record_null_step_for_wing(
+        self,
+        wing_idx: int,
+        wing: geometry.wing.Wing,
+        step: int,
+    ) -> None:
+        """Append zero-valued entries to the history lists for a non-aeroelastic wing.
+
+        Called once per time step for wings backed by a standard WingMovement (no
+        deformation). Keeps the history lists length-consistent with the aeroelastic
+        wings so that indexing by step is always valid.
+
+        :param wing_idx: Index of the wing in airplane.wings (and the per-wing lists).
+        :param wing: The Wing object at the current time step.
+        :param step: The current time step index.
+        :return: None
+        """
+        assert wing.panels is not None
+        num_chordwise_panels = wing.num_chordwise_panels
+        num_spanwise_panels = wing.num_spanwise_panels
+        assert num_spanwise_panels is not None
+        zero_moments = np.zeros(
+            (num_chordwise_panels, num_spanwise_panels, 3), dtype=float
+        )
+        num_deformation_rows = self.net_deformation_per_wing[wing_idx].shape[0]
+        self.per_step_inertial_per_wing[wing_idx].append(zero_moments)
+        self.per_step_aero_per_wing[wing_idx].append(zero_moments)
+        self.net_data_per_wing[wing_idx].append(
+            np.zeros((num_deformation_rows, 3), dtype=float)
+        )
+        self.angular_velocity_data_per_wing[wing_idx].append(
+            np.zeros((num_deformation_rows, 3), dtype=float)
+        )
+        self.flap_points_per_wing[wing_idx].append(
+            np.zeros_like(
+                np.array(
+                    [[panel.Cpp_GP1_CgP1 for panel in row] for row in wing.panels]
+                ),
+                dtype=float,
+            )
+        )
+
+    def calculate_wing_panel_accelerations(self, wing_idx: int = 0) -> np.ndarray:
+        """Compute panel accelerations using finite difference of stored positions.
+
+        Calculates second-order accelerations using the finite difference formula: a =
+        (p[n] - 2*p[n-1] + p[n-2]) / dt^2.
+
+        :param wing_idx: The index of the wing in airplane.wings whose positions are
+            used for the acceleration calculation. The default is 0.
+        :return: An (N_chordwise, N_spanwise, 3) ndarray of floats representing panel
+            center accelerations in the global frame. Returns zeros if fewer than 3
+            position snapshots are available.
+        """
+        positions = self.positions_per_wing[wing_idx]
+        if len(positions) <= 2:
+            if len(positions) == 0:
+                return np.zeros(1, dtype=float)
+            return np.zeros_like(positions[0])
+        dt = self.movement.delta_time
+        # If given a relatively large dt value, the finite difference calculation can
+        # produce very large accelerations that cause numerical instability in the
+        # spring ODE integration. A higher order model may be useful if this is the
+        # case.
+        pos_m1: np.ndarray = positions[-1]
+        pos_m2: np.ndarray = positions[-2]
+        pos_m3: np.ndarray = positions[-3]
+        return np.array((pos_m1 - 2 * pos_m2 + pos_m3) / (dt * dt))
+
+    def calculate_mass_matrix(self, wing: geometry.wing.Wing) -> np.ndarray:
+        """Generate the mass distribution matrix for all wing panels.
+
+        Distributes the total spanwise mass (wing_density) across panel areas to form a
+        panel-by-panel mass matrix. Each panel's mass is proportional to its area times
+        the specified wing_density.
+
+        :param wing: A Wing object whose panels define the mass distribution.
+        :return: An (N_chordwise, N_spanwise, 3) ndarray of floats representing the mass
+            at each panel. The three components are identical (mass scalar replicated
+            for x, y, z axes).
+        """
+        assert wing.panels is not None
+        areas = np.array([[panel.area for panel in row] for row in wing.panels])
+        return np.repeat(areas[:, :, None], 3, axis=2) * self.wing_density
+
+    def initialize_next_problem(
+        self,
+        solver: CoupledUnsteadyRingVortexLatticeMethodSolver,
+        step: int,
+    ) -> None:
+        # The solver invokes this on every step. Aeroelasticity only builds the next
+        # step's deformed geometry, so there is nothing to do on the final step.
+        if step >= self.num_steps - 1:
+            return
+
+        aeroelastic_solver = cast(
+            "AeroelasticUnsteadyRingVortexLatticeMethodSolver", solver
+        )
+
+        next_step = len(self._steady_problems)
+
+        # calculate_wing_deformation returns a per-wing list: each element is either
+        # the deformation ndarray for an aeroelastic wing or None for a standard wing.
+        deformationAnglesRad_Wcsp_to_Wcs_ixyz = self.calculate_wing_deformation(
+            aeroelastic_solver, next_step
+        )
+
+        # The structural model works in radians; the geometry API expects degrees.
+        deformationAngles_Wcsp_to_Wcs_ixyz = [
+            np.rad2deg(arr) if arr is not None else None
+            for arr in deformationAnglesRad_Wcsp_to_Wcs_ixyz
+        ]
+
+        # Generate the deformed airplane at this step.
+        airplane = self._aeroelastic_movement.generate_airplane_at_time_step(
+            airplane_movement_index=0,
+            step=next_step,
+            deformationAngles_Wcsp_to_Wcs_ixyz=deformationAngles_Wcsp_to_Wcs_ixyz,
+        )
+        operating_point = self._aeroelastic_movement.operating_points[next_step]
+
+        self._steady_problems.append(
+            SteadyProblem(
+                airplanes=[airplane],
+                operating_point=operating_point,
+            )
+        )
+
+    def calculate_wing_deformation(
+        self,
+        solver: AeroelasticUnsteadyRingVortexLatticeMethodSolver,
+        step: int,
+    ) -> list[np.ndarray | None]:
+        """Compute cumulative wing deformation for the current time step.
+
+        Loops over every Wing in the current airplane. For wings backed by an
+        AeroelasticWingMovement, orchestrates the inertial moment, aero moment, and
+        spring ODE integration, updates internal per-wing state, and returns the
+        deformation array. For wings backed by a standard WingMovement, records null
+        entries in the history lists and returns None for that wing.
+
+        :param solver: The solver instance providing aerodynamic moment data
+            (moments_GP1_Slep and stackSlep_GP1_CgP1).
+        :param step: The current time step index (0-indexed).
+        :return: A list of length len(airplane.wings) where each element is either an
+            (N_spanwise+1, 3) ndarray of cumulative deformation angles for an
+            aeroelastic wing or None for a non-aeroelastic wing. Each row is a (3,)
+            angle vector that perturbs the corresponding WingCrossSection's
+            angles_Wcsp_to_Wcs_ixyz, using an intrinsic xy'z" sequence. The units are in
+            radians.
+        """
+        curr_problem: SteadyProblem = self._steady_problems[-1]
+        airplane = curr_problem.airplanes[0]
+        wing_movements = self._aeroelastic_movement.airplane_movements[0].wing_movements
+
+        results: list[np.ndarray | None] = []
+        panel_offset = 0
+
+        for wing_idx, wing in enumerate(airplane.wings):
+            wing_movement = wing_movements[wing_idx]
+            num_chordwise_panels = wing.num_chordwise_panels
+            num_spanwise_panels = wing.num_spanwise_panels
+            assert num_spanwise_panels is not None
+            num_panels = num_chordwise_panels * num_spanwise_panels
+
+            if isinstance(
+                wing_movement,
+                aeroelastic_wing_movement_mod.AeroelasticWingMovement,
+            ):
+                mass_matrix = self.calculate_mass_matrix(wing)
+
+                aeroMoments_GP1_Slep = self._extract_aero_moments(
+                    solver,
+                    num_chordwise_panels,
+                    num_spanwise_panels,
+                    num_panels,
+                    panel_offset,
+                )
+                inertial_moments = self._calculate_inertial_moments(
+                    solver,
+                    wing,
+                    mass_matrix,
+                    num_chordwise_panels,
+                    num_spanwise_panels,
+                    num_panels,
+                    panel_offset,
+                    wing_idx,
+                )
+
+                # A mirror-meshed Wing's panel grid runs tip to root spanwise,
+                # while the structural solve and the WingCrossSection movements
+                # that consume its output run root to tip, so flip the spanwise
+                # axis of the per-panel arrays to put them in root-to-tip strip
+                # order.
+                if wing.mirror_only:
+                    mass_matrix = mass_matrix[:, ::-1, :]
+                    aeroMoments_GP1_Slep = aeroMoments_GP1_Slep[:, ::-1, :]
+                    inertial_moments = inertial_moments[:, ::-1, :]
+
+                thetas, omegas = self.calculate_spring_moments(
+                    num_spanwise_panels=num_spanwise_panels,
+                    wing=wing,
+                    mass_matrix=mass_matrix,
+                    aero_moments=aeroMoments_GP1_Slep,
+                    step=step,
+                    wing_idx=wing_idx,
+                    wing_movement=wing_movement,
+                )
+
+                step_deformation = self._build_deformation_vector(
+                    thetas, num_spanwise_panels
+                )
+                self._apply_moment_updates(
+                    step=step,
+                    step_deformation=step_deformation,
+                    omegas=omegas,
+                    inertial_moments=inertial_moments,
+                    aeroMoments_GP1_Slep=aeroMoments_GP1_Slep,
+                    wing_idx=wing_idx,
+                )
+
+                results.append(self.net_deformation_per_wing[wing_idx])
+            else:
+                self._record_null_step_for_wing(wing_idx, wing, step)
+                results.append(None)
+
+            panel_offset += num_panels
+
+        # Plot results at end of simulation if enabled.
+        if self.plot_flap_cycle and step == self.num_steps - 1:
+            self._plot_aeroelastic_results()
+
+        return results
+
+    def _extract_aero_moments(
+        self,
+        solver: AeroelasticUnsteadyRingVortexLatticeMethodSolver,
+        num_chordwise_panels: int,
+        num_spanwise_panels: int,
+        num_panels: int,
+        panel_offset: int,
+    ) -> np.ndarray:
+        """Extract and scale aerodynamic moments from the solver output.
+
+        Uses the strip leading edge points as the reference point for moment
+        calculations, consistent with the assumption of a torsional spring at the
+        leading edge. Each strip's leading edge point is the leading edge point of its
+        outboard bounding WingCrossSection, the same WingCrossSection that receives the
+        strip's twist.
+
+        :param solver: The solver instance with moments_GP1_Slep data.
+        :param num_chordwise_panels: Number of chordwise panel rows.
+        :param num_spanwise_panels: Number of spanwise panel rows.
+        :param num_panels: Total number of panels (num_chordwise * num_spanwise).
+        :param panel_offset: The flat panel index offset into solver.moments_GP1_Slep at
+            which this wing's data begins.
+        :return: An (N_chordwise, N_spanwise, 3) ndarray of scaled aerodynamic moments
+            in the global panel frame.
+        """
+        aeroMoments_GP1_Slep = (
+            np.array(
+                solver.moments_GP1_Slep[panel_offset : panel_offset + num_panels]
+            ).reshape(num_chordwise_panels, num_spanwise_panels, 3)
+            * _AERO_SCALING
+        )
+        return aeroMoments_GP1_Slep
+
+    def _calculate_inertial_moments(
+        self,
+        solver: AeroelasticUnsteadyRingVortexLatticeMethodSolver,
+        wing: geometry.wing.Wing,
+        mass_matrix: np.ndarray,
+        num_chordwise_panels: int,
+        num_spanwise_panels: int,
+        num_panels: int,
+        panel_offset: int,
+        wing_idx: int,
+    ) -> np.ndarray:
+        """Calculate inertial moments from panel accelerations and mass distribution.
+
+        Computes panel accelerations via finite difference, multiplies by mass to get
+        forces, then calculates moments about the leading edge reference point using
+        cross products.
+
+        :param solver: The solver instance providing leading edge point positions.
+        :param wing: The Wing object containing panel definitions.
+        :param mass_matrix: An (N_chordwise, N_spanwise, 3) ndarray of panel masses.
+        :param num_chordwise_panels: Number of chordwise panel rows.
+        :param num_spanwise_panels: Number of spanwise panel rows.
+        :param num_panels: Total number of panels (num_chordwise * num_spanwise).
+        :param panel_offset: The flat panel index offset into solver.stackSlep_GP1_CgP1
+            at which this wing's data begins.
+        :param wing_idx: Index of the wing in airplane.wings.
+        :return: An (N_chordwise, N_spanwise, 3) ndarray of inertial moment vectors.
+        """
+        # Store current panel center positions.
+        assert wing.panels is not None
+        self.positions_per_wing[wing_idx].append(
+            np.array([[panel.Cpp_GP1_CgP1 for panel in row] for row in wing.panels])
+        )
+
+        # Calculate panel accelerations and inertial forces.
+        inertial_forces = (
+            self.calculate_wing_panel_accelerations(wing_idx) * mass_matrix
+        )
+
+        # Calculate moments about leading edge points via cross product.
+        inertial_moments = np.cross(
+            self.positions_per_wing[wing_idx][-1]
+            - solver.stackSlep_GP1_CgP1[
+                panel_offset : panel_offset + num_panels
+            ].reshape((num_chordwise_panels, num_spanwise_panels, 3)),
+            inertial_forces,
+            axis=2,
+        )
+        return np.array(inertial_moments)
+
+    def _build_deformation_vector(
+        self, thetas: np.ndarray, num_spanwise_panels: int
+    ) -> np.ndarray:
+        """Construct the step deformation vector from torsional angles.
+
+        Converts the torsional angles output from the spring-damper ODE (one per
+        spanwise section) into a full (N_spanwise+1, 3) deformation vector with scaling
+        applied to the y-component (torsional angle).
+
+        :param thetas: An (N_spanwise+1,) ndarray of torsional angles in radians.
+        :param num_spanwise_panels: Number of spanwise panel rows.
+        :return: An (N_spanwise+1, 3) ndarray with zero-valued x and z components and
+            scaled torsional angles in the y component.
+        """
+        step_deformation = np.array(
+            [
+                np.array(
+                    [
+                        0,
+                        thetas[i + 1] * _DEFORMATION_SCALING,
+                        0,
+                    ]
+                )
+                for i in range(num_spanwise_panels)
+            ]
+        )
+        step_deformation = np.insert(step_deformation, 0, np.array([0, 0, 0]), axis=0)
+        return step_deformation
+
+    def _apply_moment_updates(
+        self,
+        step: int,
+        step_deformation: np.ndarray,
+        omegas: np.ndarray,
+        inertial_moments: np.ndarray,
+        aeroMoments_GP1_Slep: np.ndarray,
+        wing_idx: int,
+    ) -> None:
+        """Update internal moment and deformation state arrays for one wing.
+
+        Stores per-step moment and deformation data, updates the cumulative net
+        deformation and angular velocity state (committing both together, and discarding
+        both during the early unstable steps), and tracks wing deflection points
+        relative to the undeformed baseline.
+
+        :param step: The current time step index.
+        :param step_deformation: The (N_spanwise+1, 3) deformation vector for this step,
+            with its stations in root-to-tip order.
+        :param omegas: An (N_spanwise+1,) ndarray of angular velocities, with its
+            stations in root-to-tip order.
+        :param inertial_moments: An (N_chordwise, N_spanwise, 3) ndarray of inertial
+            moments, with the spanwise axis in root-to-tip order.
+        :param aeroMoments_GP1_Slep: An (N_chordwise, N_spanwise, 3) ndarray of aero
+            moments, with the spanwise axis in root-to-tip order.
+        :param wing_idx: Index of the wing in airplane.wings (and the per-wing lists).
+        :return: None
+        """
+        # Generate the reference (undeformed) airplane at this step to get the
+        # baseline panel positions for tracking wing deflection.
+        ref_airplane = self._aeroelastic_movement.generate_airplane_at_time_step(
+            airplane_movement_index=0, step=step
+        )
+        ref_problem = SteadyProblem(
+            [ref_airplane], self._aeroelastic_movement.operating_points[step]
+        )
+        undeformed_wing = ref_problem.airplanes[0].wings[wing_idx]
+        assert undeformed_wing.panels is not None
+        undeformed_positions = np.array(
+            [[panel.Cpp_GP1_CgP1 for panel in row] for row in undeformed_wing.panels]
+        )
+        if self.base_wing_positions_per_wing[wing_idx].size == 0:
+            self.base_wing_positions_per_wing[wing_idx] = np.array(undeformed_positions)
+
+        # Track wing deflection relative to undeformed baseline.
+        self.flap_points_per_wing[wing_idx].append(
+            np.array(undeformed_positions) - self.base_wing_positions_per_wing[wing_idx]
+        )
+
+        # Store per-step moment components for later analysis/plotting.
+        self.per_step_inertial_per_wing[wing_idx].append(inertial_moments.copy())
+        self.per_step_aero_per_wing[wing_idx].append(aeroMoments_GP1_Slep.copy())
+
+        # Update the cumulative deformation and angular velocity state together,
+        # discarding both during the first step_discards steps, whose numerical
+        # startup effects cause large aerodynamic forces. The strips' ODEs are
+        # re-seeded from this state, so committing only one component would seed a
+        # mixed state.
+        if step > self.step_discards:
+            self.net_deformation_per_wing[wing_idx] = step_deformation
+            self.angular_velocities_per_wing[wing_idx][:, 1] = omegas
+
+        # Store deformation and angular velocity history.
+        self.net_data_per_wing[wing_idx].append(
+            self.net_deformation_per_wing[wing_idx].copy()
+        )
+        self.angular_velocity_data_per_wing[wing_idx].append(
+            self.angular_velocities_per_wing[wing_idx].copy()
+        )
+
+    def _plot_aeroelastic_results(self, wing_idx: int = 0) -> None:
+        """Generate and display time-history plots of aeroelastic results.
+
+        Creates plots of per-step and cumulative deformations, moment components
+        (inertial, aerodynamic), and wing deflection points. Useful for visualizing the
+        aeroelastic coupling behavior.
+
+        :param wing_idx: Index of the wing in airplane.wings whose data is plotted. The
+            default is 0.
+        :return: None
+        """
+        zero_curve = np.zeros(
+            (1, np.array(self.per_step_inertial_per_wing[wing_idx]).shape[0])
+        )
+
+        # Deformation time histories
+        self.plot_flap_cycle_curves(
+            np.array(self.net_data_per_wing[wing_idx])[:, :, 1].T.tolist(),
+            "Net Deformation",
+        )
+
+        # Moment component time histories
+        self.plot_flap_cycle_curves(
+            np.vstack(
+                (
+                    zero_curve,
+                    np.array(self.per_step_inertial_per_wing[wing_idx])[:, :, :, 2]
+                    .sum(axis=1)
+                    .T,
+                )
+            ).tolist(),
+            "Per Step Inertial Moments",
+        )
+        self.plot_flap_cycle_curves(
+            np.vstack(
+                (
+                    zero_curve,
+                    np.array(self.per_step_aero_per_wing[wing_idx])[:, :, :, 1]
+                    .sum(axis=1)
+                    .T,
+                )
+            ).tolist(),
+            "Per Step Aero Moments",
+        )
+
+        # Wing deflection tracking
+        self.plot_flap_cycle_curves(
+            np.vstack(
+                (
+                    zero_curve,
+                    np.array(self.flap_points_per_wing[wing_idx])[:, :, :, 2]
+                    .sum(axis=1)
+                    .T,
+                )
+            ).tolist(),
+            "Flap Points Z",
+        )
+
+    def calculate_spring_moments(
+        self,
+        num_spanwise_panels: int,
+        wing: geometry.wing.Wing,
+        mass_matrix: np.ndarray,
+        aero_moments: np.ndarray,
+        step: int,
+        wing_idx: int,
+        wing_movement: aeroelastic_wing_movement_mod.AeroelasticWingMovement,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Solve the torsional spring-damper ODE for each spanwise section.
+
+        Solves the torsional spring-damper ODE independently for each spanwise section,
+        accounting for aerodynamic moments, inertial forces, and structural properties.
+        Uses the parallel axis theorem to compute rotational inertia about the flapping
+        axis.
+
+        The spanwise section index runs root to tip, matching the order of the Wing's
+        wing_cross_sections, and the mass_matrix and aero_moments arrays must be
+        supplied with their spanwise axes in that same root-to-tip order (the caller
+        flips them for mirror-meshed Wings, whose panel grids run tip to root).
+
+        :param num_spanwise_panels: Number of spanwise panel rows in the wing.
+        :param wing: The Wing object containing geometric and structural definitions.
+        :param mass_matrix: An (N_chordwise, N_spanwise, 3) ndarray of panel masses,
+            with the spanwise axis in root-to-tip order.
+        :param aero_moments: An (N_chordwise, N_spanwise, 3) ndarray of aerodynamic
+            moments from the aerodynamic solver, with the spanwise axis in root-to-tip
+            order.
+        :param step: The current time step index.
+        :param wing_idx: Index of the wing in airplane.wings.
+        :param wing_movement: The AeroelasticWingMovement providing the prescribed
+            flapping parameters used for inertial torque generation.
+        :return: A tuple of two ndarrays: - thetas: (N_spanwise+1,) ndarray of
+            torsional angles (radians) at each station. - omegas: (N_spanwise+1,)
+            ndarray of angular velocities (rad/s) at each station. **Notes:** The
+            rotational inertia is computed as: I = (1/12)*M*(L^2 + W^2) + M*d^2, where M
+            is panel mass, L is chord, W is span width, and d is distance from the
+            flapping axis (computed cumulatively using the parallel axis theorem).
+        """
+        thetas = np.zeros(num_spanwise_panels + 1)
+        omegas = np.zeros(num_spanwise_panels + 1)
+        d = 0.0  # distance from flapping axis to panel centroid (computed in half-span increments)
+        for span_panel in range(num_spanwise_panels):
+            aero_span_moment = np.sum(aero_moments[:, span_panel, 1])
+            # Re-seed the strip's ODE from its own state at the end of the previous
+            # time step. The state arrays hold one entry per WingCrossSection, and a
+            # strip's state lives at its outboard bounding WingCrossSection, index
+            # span_panel + 1. The WingCrossSection at index span_panel bounds this
+            # strip on its inboard side, and the root WingCrossSection (index 0) is
+            # clamped.
+            theta0: float = self.net_deformation_per_wing[wing_idx][span_panel + 1][1]
+            omega0: float = self.angular_velocities_per_wing[wing_idx][span_panel + 1][
+                1
+            ]
+
+            dt = self.movement.delta_time
+            mass = mass_matrix[:, span_panel, :].sum()
+            # Equation for rotational inertia of rectangular prism about flapping axis
+            # Considers two factors, the first is the rotational inertial of a
+            # rectangular prism about its centroid, the second is the parallel axis
+            # theorem to account for distance from flapping axis to the panel centroid
+            L = (
+                wing.wing_cross_sections[span_panel].chord
+                + wing.wing_cross_sections[span_panel + 1].chord
+            ) / 2
+            assert wing.panels is not None
+            # The span_panel index runs root to tip, matching the
+            # wing_cross_sections list, but a mirror-meshed Wing's panel grid
+            # runs tip to root spanwise, so map the index when reading panel
+            # geometry.
+            if wing.mirror_only:
+                panel_span_index = num_spanwise_panels - 1 - span_panel
+            else:
+                panel_span_index = span_panel
+            W: float = float(
+                np.linalg.norm(wing.panels[0][panel_span_index].frontLeg_G)
+            )
+            d += W / 2
+            span_I = 1 / 12 * mass * (L**2 + W**2) + mass * (d**2)
+            theta, omega = self.calculate_torsional_spring_moment(
+                dt,
+                I=1 / 2 * mass * (L**2),
+                theta0=theta0,
+                omega0=omega0,
+                aero_span_moment=aero_span_moment,
+                step=step,
+                span_I=span_I,
+                wing_movement=wing_movement,
+            )
+            d += W / 2
+            thetas[span_panel + 1] = theta
+            omegas[span_panel + 1] = omega
+
+        return thetas, omegas
+
+    def calculate_torsional_spring_moment(
+        self,
+        dt: float,
+        I: float,
+        theta0: float,
+        omega0: float,
+        aero_span_moment: float,
+        step: int,
+        span_I: float,
+        wing_movement: (
+            aeroelastic_wing_movement_mod.AeroelasticWingMovement | None
+        ) = None,
+        num_steps: int = 2,
+    ) -> tuple[float, float]:
+        """Solve the torsional spring-damper ODE for a single wing section.
+
+        Integrates the forced torsional damped harmonic oscillator equation:
+        I*d(omega)/dt = tau_aero + tau_inertial - k*theta - c*omega
+
+        Returns the angular displacement and velocity at the end of the time step.
+
+        :param dt: The time step duration (seconds).
+        :param I: The rotational inertia about the flapping axis (kg*m^2).
+        :param theta0: Initial torsional angle at the start of the time step (radians).
+        :param omega0: Initial angular velocity at the start of the time step (rad/s).
+        :param aero_span_moment: The y-component aerodynamic moment summed over
+            chordwise panels for this spanwise section (N*m).
+        :param step: The current time step index (used for inertial torque evaluation).
+        :param span_I: The rotational inertia including parallel axis theorem (kg*m^2).
+            This is the actual inertia used in the ODE solver.
+        :param wing_movement: The AeroelasticWingMovement whose prescribed flapping
+            parameters are used. When None, falls back to self.wing_movement. The
+            default is None.
+        :param num_steps: Number of time sub-steps for numerical integration. The
+            default is 2.
+        :return: A tuple of (theta, omega) where: - theta: Final torsional angle
+            (radians). - omega: Final angular velocity (rad/s).
+        """
+        k = self.spring_constant
+        c = self.damping_constant
+        t = np.linspace(dt * (step - 1), dt * step, num_steps)
+
+        # Forced numerical integration of the spring-damper ODE
+        theta, omega = self.spring_numerical_ode(
+            t,
+            k,
+            c,
+            I,
+            theta0,
+            omega0,
+            aero_span_moment,
+            self.generate_inertial_torque_function(span_I, wing_movement=wing_movement),
+        )
+
+        return theta, omega
+
+    def generate_inertial_torque_function(
+        self,
+        span_I: float,
+        wing_movement: (
+            aeroelastic_wing_movement_mod.AeroelasticWingMovement | None
+        ) = None,
+    ):
+        """Generate the prescribed wing motion inertial torque function.
+
+        Extracts the prescribed flapping motion from the wing_movement definition and
+        creates a callable inertial torque function tau_inertial = I *
+        d^2(theta_prescribed)/dt^2. Supports sinusoidal and custom spacing functions.
+
+        :param span_I: The rotational inertia of the wing span section about the
+            flapping axis (kg*m^2).
+        :param wing_movement: The AeroelasticWingMovement whose prescribed flapping
+            parameters are used. When None, falls back to self.wing_movement. The
+            default is None.
+        :return: A callable function that accepts time and returns the inertial torque
+            (N*m) due to the prescribed wing motion acceleration. For a zero flapping
+            amplitude (no prescribed flapping), the returned function is identically
+            zero regardless of the spacing. For sinusoidal spacing: tau = -I * b^2 *
+            sin(b * t + h) * A, where b = 2 * pi / period, h = phase, A = amplitude.
+            For custom spacing, uses the wing movement's
+            spacingAnglesSecondDerivative_Gs_to_Wn_ixyz, which its constructor guarantees
+            is present whenever the spacing is a custom callable.
+        """
+        _wing_movement = (
+            wing_movement if wing_movement is not None else self.wing_movement
+        )
+        amp = _wing_movement.ampAngles_Gs_to_Wn_ixyz[0]
+
+        # A wing with no prescribed flapping applies no inertial torque. Return the
+        # zero function before computing the flapping frequency, whose 2 * pi / period
+        # expression is undefined for the zero period that a zero amplitude requires.
+        if amp == 0.0:
+            return lambda time: 0.0
+
+        b = 2 * np.pi / _wing_movement.periodAngles_Gs_to_Wn_ixyz[0]
+        h = np.deg2rad(_wing_movement.phaseAngles_Gs_to_Wn_ixyz[0])
+        spacing = _wing_movement.spacingAngles_Gs_to_Wn_ixyz[0]
+        if spacing == "sine":
+            # amp is in degrees (ampAngles_Gs_to_Wn_ixyz); convert to radians so
+            # the inertial torque (N*m) is consistent with the SI spring-damper ODE.
+            torque_func = (
+                lambda time: -1
+                * (b**2)
+                * np.sin(b * time + h)
+                * np.deg2rad(amp)
+                * span_I
+            )
+        elif spacing == "uniform":
+            raise ValueError(
+                "Sawtooth function (uniform spacing) is not differentiable, "
+                "cannot be used for inertial torque function."
+            )
+        elif callable(spacing):
+            # The wing movement's constructor guarantees a matching second derivative
+            # whenever the spacing component is a custom callable.
+            deriv = _wing_movement.spacingAnglesSecondDerivative_Gs_to_Wn_ixyz[0]
+            assert deriv is not None
+            # deriv is the second derivative before amplitude scaling; amp is in
+            # degrees, so convert to radians to keep torque in N*m.
+            torque_func = lambda time: np.deg2rad(amp) * deriv(time) * span_I
+
+        return torque_func
+
+    def spring_numerical_ode(
+        self,
+        t: np.ndarray,
+        k: float,
+        c: float,
+        I: float,
+        theta0: float,
+        omega0: float,
+        aero_torque: float,
+        inertial_torque_func,
+    ) -> tuple[float, float]:
+        """Numerically integrate the torsional spring-damper ODE.
+
+        Solves the second-order forced ODE: I * d^2(theta)/dt^2 = tau_aero + tau_inertial(t) - k*theta -
+        c*d(theta)/dt
+
+        using scipy.integrate.solve_ivp with tolerances a few orders of magnitude
+        stricter than scipy's defaults. This integration is re-seeded from the previous
+        state at every outer time step, so its local errors compound across a
+        simulation rather than being controlled within a single integration. The
+        stricter tolerances guard against that accumulation, and against the absolute
+        tolerance floor swamping small torsional responses, at a cost that is small
+        relative to the aerodynamic solve.
+
+        :param t: A (N,) ndarray of time points for integration evaluation.
+        :param k: Spring constant (N*m/rad).
+        :param c: Damping constant (N*m*s/rad).
+        :param I: Rotational inertia (kg*m^2). This parameter is present for potential
+            alternative models of inertia.
+        :param theta0: Initial angular displacement (radians).
+        :param omega0: Initial angular velocity (rad/s).
+        :param aero_torque: Constant aerodynamic torque acting on the section (N*m).
+        :param inertial_torque_func: A callable function of time that returns the
+            inertial torque from prescribed motion acceleration (N*m).
+        :return: A tuple of (theta, omega) representing the final angle and angular
+            velocity at the last time point in t.
+        """
+
+        def tau(time: float) -> float:
+            """Total external torque (aerodynamic + inertial from prescribed motion)."""
+            return float(aero_torque + inertial_torque_func(time))
+
+        def ode(time: float, y: np.ndarray) -> np.ndarray:
+            """ODE system: d(theta)/dt = omega, d(omega)/dt = (tau - c*omega - k*theta)/I."""
+            theta, omega = y
+            return np.array([omega, (tau(time) - c * omega - k * theta) / I])
+
+        sol = solve_ivp(
+            ode,
+            (t[0], t[-1]),
+            np.array([theta0, omega0]),
+            t_eval=t,
+            rtol=_SPRING_ODE_RELATIVE_TOLERANCE,
+            atol=_SPRING_ODE_ABSOLUTE_TOLERANCE,
+        )
+
+        theta = float(sol.y[0][-1])
+        omega = float(sol.y[1][-1])
+
+        return theta, omega
+
+    def plot_flap_cycle_curves(
+        self,
+        data: list,
+        title: str,
+        flap_cycle=None,
+    ) -> None:
+        """Visualize time histories of moments, deformations, or forces.
+
+        Creates a multi-curve line plot showing moment or deformation values across all
+        time steps, with optional overlay of a reference flap cycle.
+
+        :param data: A list of lists where each inner list represents a curve to plot.
+            Values in each curve are plotted against step number.
+        :param title: The title for the plot and the output PNG filename (spaces
+            replaced with underscores).
+        :param flap_cycle: Optional reference curve to overlay on the plot. If provided,
+            should be a list of values to plot with label "Flap Cycle" in black. The
+            default is None.
+        :return: None **Notes:** The plot is saved as a PNG file with the title as the
+            filename. The plot window is displayed to the user. Figure size is 12x6
+            inches at 200 DPI.
+        """
+        plt.figure(figsize=(12, 6), dpi=200)
+
+        for i, curve in enumerate(data):
+            x = range(len(curve))
+            plt.plot(x, curve, label=f"Curve {i}")
+        if flap_cycle is not None:
+            plt.plot(
+                range(len(flap_cycle)), flap_cycle, label=f"Flap Cycle", color="black"
+            )
+        plt.xlabel("Step")
+        plt.ylabel("Value")
+        plt.title(title)
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(f"{title.replace(' ', '_')}.png")
+        plt.show()

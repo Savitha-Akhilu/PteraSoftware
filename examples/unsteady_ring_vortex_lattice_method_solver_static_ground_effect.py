@@ -1,16 +1,21 @@
-"""This script is an example of how to run Ptera Software's
-UnsteadyRingVortexLatticeMethodSolver with surface effects enabled. It uses the method
-of images to model ground effect by defining a horizontal image surface (the ground)
-beneath the Airplane. The geometry and Movement are static (no flapping)."""
+"""Demonstrates running Ptera Software's UnsteadyRingVortexLatticeMethodSolver with
+surface effects enabled.
+
+The script uses the method of images to model ground effect by defining a horizontal
+image surface (the ground) beneath an airplane, and will log simulation results in a log
+file.
+"""
+
+import logging
 
 # First, import the software's main package. Note that if you wished to import this
 # software into another package, you would first install it by running "pip install
 # pterasoftware" in your terminal.
 import pterasoftware as ps
 
-# Configure logging to display info level messages. This is important for seeing the
-# output from the log_results function.
-ps.set_up_logging(level="Info")
+# Configure logging to write info level messages to a file. To display log messages on
+# the console alongside progress bars instead, omit the handler argument.
+ps.set_up_logging(level="Info", handler=logging.FileHandler("example_solver.log"))
 
 # Create an Airplane with our custom geometry. This is the same Airplane used in the
 # unsteady_ring_vortex_lattice_method_solver_static.py example. For details about each
@@ -229,7 +234,11 @@ del v_tail_movement
 # Define a new OperatingPoint with surface effects enabled. To model ground effect, we
 # define a horizontal ground plane at z = 0 in Earth axes by specifying its unit normal
 # vector and a point on the plane. We also set CgP1_E_Eo to place the Airplane's CG 5
-# meters above the ground (negative z is up in Earth axes).
+# meters above the ground (negative z is up in Earth axes). We leave the body
+# orientation (angles_E_to_BP1_izyx) unset, which resolves to the level-flight default:
+# the airplane is pitched nose up by the angle of attack (with zero sideslip), placing
+# its velocity along the horizontal Earth x axis so it flies level over the ground
+# rather than descending into it.
 example_operating_point = ps.operating_point.OperatingPoint(
     rho=1.225,
     vCg__E=10.0,
@@ -292,32 +301,42 @@ example_solver.run(
     show_progress=True,
 )
 
-ps.output.log_results(solver=example_solver)
+# Save the solved solver to a compressed JSON file. This allows us to load the results
+# later without re-running the simulation. Use ".json.gz" for gzip compression, which is
+# recommended over plain JSONs for all but the smallest, unmeshed geometry objects.
+ps.save("example_solver.json.gz", example_solver)
 
-# Call the draw function on the solver. The image surface and reflected geometry are
-# automatically rendered. Press "q" to close the plotter after it draws the output.
+# Load the saved solver. The loaded object is identical to the original and can be
+# passed to any output function.
+loaded_solver = ps.load("example_solver.json.gz")
+
+ps.output.log_results(solver=loaded_solver)
+
+# Call the draw function on the loaded solver. The image surface and reflected geometry
+# are automatically rendered. Press any key to close the plotter after it draws the
+# output.
 ps.output.draw(
-    solver=example_solver,
+    solver=loaded_solver,
     scalar_type="lift",
     show_streamlines=True,
     show_wake_vortices=False,
-    save=False,
+    save=True,
 )
 
-# Call the animate function on the solver. This produces a GIF of the wake being shed.
-# The GIF is saved in the same directory as this script. Press "q", after orienting the
-# view, to begin the animation.
+# Call the animate function on the loaded solver. This produces a GIF of the wake being
+# shed. The GIF is saved in the same directory as this script. Press any key, after
+# orienting the view, to begin the animation.
 ps.output.animate(
-    unsteady_solver=example_solver,
+    unsteady_solver=loaded_solver,
     scalar_type="lift",
     show_wake_vortices=True,
-    save=False,
+    save=True,
 )
 
-# Call the plotting function on the solver. This produces graphs of the loads with
-# respect to time.
+# Call the plotting function on the loaded solver. This produces graphs of the loads
+# with respect to time.
 ps.output.plot_results_versus_time(
-    unsteady_solver=example_solver,
+    unsteady_solver=loaded_solver,
     show=True,
-    save=False,
+    save=True,
 )

@@ -6,7 +6,7 @@ We are excited that you are interested in contributing to **Ptera Software**! Th
 
 ## Before Contributing
 
-Please review the following documents before making contributions. These documents are also available on the [Ptera Software documentation website](https://pterasoftware.readthedocs.io/).
+Please review the following documents before making contributions. These documents are also available on the [Ptera Software documentation website](https://docs.pterasoftware.com/).
 
 1. [README](README.md)
 2. [Code of Conduct](CODE_OF_CONDUCT.md)
@@ -28,7 +28,7 @@ There are three main ways you can contribute:
 3. [**Contribute code**](#contributing-code)
     - Submit changes that add new features, fix bugs, improve performance, or enhance documentation.
     - Code contributions can address your own ideas or work on existing open issues.
-    - If you find an issue labeled `good first issue` that you want to work on, **comment on the issue to claim it** before starting work. This prevents duplicate efforts.
+    - If you find an issue labeled `good_first_issue` that you want to work on, **comment on the issue to claim it** before starting work. This prevents duplicate efforts.
 
 ---
 
@@ -61,7 +61,7 @@ For feature requests:
 Ptera Software now uses GitHub Flow to manage code contributions. If this is new to you, it's a good idea to read through [this guide](https://docs.github.com/en/get-started/using-github/github-flow) first. Once you understand the process, here's how to implement it:
 
 1. **Choose what to work on**
-    - Look for issues labeled `good first issue`.
+    - Look for issues labeled `good_first_issue`.
         - If you want to work on one, check that no one else has already commented claiming it. If unclaimed, comment on the issue to claim it and a maintainer will then "assign" the issue to you.
         - If you want to work on a claimed issue that hasn't been updated in a while, write a comment asking if the user who originally claimed it is still actively working on it.
     - If you have your own idea, search the issues to ensure it hasn't already been proposed.
@@ -71,7 +71,7 @@ Ptera Software now uses GitHub Flow to manage code contributions. If this is new
 
    Some issues and pull requests (PRs) may represent work that is actively under design or refinement.
 
-   If a PR exists, or if an issue has been assigned to or claimed by someone else, please do **not** start parallel implementation work without first checking in via a comment. A short message like "Are you still actively working on this?" or "Is this a good time to help with X?” is usually sufficient.
+   If a PR exists, or if an issue has been assigned to or claimed by someone else, please do **not** start parallel implementation work without first checking in via a comment. A short message like "Are you still actively working on this?" or "Is this a good time to help with X?" is usually sufficient.
 
    This helps avoid duplicated effort and ensures that contributions align with the current design direction.
 2. **Set up your local environment**
@@ -97,6 +97,46 @@ Ptera Software now uses GitHub Flow to manage code contributions. If this is new
     deactivate
     ```
     **Note:** If you use PyCharm, the repository includes a pre-configured `.idea` directory with code style settings and inspection profiles. If you use Claude Code, the repository also includes a pre-configured `CLAUDE.md` file and a `.claude` directory with permission and sandbox settings.
+
+   #### PyCharm Setup
+
+   The repository tracks a small set of `.idea/` files for shared code style and inspection settings, and PyCharm rewrites them on your machine whenever you open the project. To keep these local rewrites out of your commits, run two commands once from the project root after cloning.
+
+   First, add `.idea/` to your personal exclude file so any new `.idea/` files PyCharm creates do not appear in `git status`. This file lives only in your clone and is never committed:
+
+   ```shell
+   echo ".idea/" >> .git/info/exclude
+   ```
+
+   Second, mark every currently-tracked `.idea/` file with `skip-worktree` so PyCharm rewriting them does not appear in `git status` either. Run this in a shell that supports pipes (Git Bash on Windows, Terminal on macOS, or any Linux shell):
+
+   ```shell
+   git ls-files .idea/ | xargs git update-index --skip-worktree
+   ```
+
+   The tracked `.idea/` files remain in the repository, but local modifications to them are ignored. Before opening a PR, confirm that `git status` does not list anything inside `.idea/`.
+
+   If a future pull from `upstream/main` legitimately updates one of the tracked `.idea/` files, `git pull` will refuse with an error like:
+
+   ```
+   error: Your local changes to the following files would be overwritten by merge:
+           .idea/<some-file>
+   Please commit your changes or stash them before you merge.
+   Aborting
+   ```
+
+   If every file listed in the error is inside `.idea/`, discard your local versions (PyCharm will rewrite them the next time you open the project) and pull again:
+
+   ```shell
+   git checkout HEAD -- .idea/
+   git pull
+   ```
+
+   If any listed file is outside `.idea/`, stop and ask in a [discussion](https://github.com/camUrban/PteraSoftware/discussions) before running anything else.
+
+   #### Pre-commit Hooks
+
+   The hooks in `.pre-commit-config.yaml` are SHA-pinned with `# frozen: <tag>` comments, so Dependabot can manage bumps with a 7-day cooldown that gives the community time to catch a malicious release before it reaches us. Do not run `pre-commit autoupdate` directly: it rewrites every `rev:` field back to a moving tag and undoes the pinning.
 3. **Create a new branch**
     - Branch from main for each change.
     - Use descriptive branch names, such as `feature/add_new_plot` or `bug/fix_units`.
@@ -126,7 +166,7 @@ Ptera Software now uses GitHub Flow to manage code contributions. If this is new
     - Include references, derivations, or reasoning where appropriate.
     - Add tests that validate the behavior against known physical expectations (e.g., symmetry, limiting cases, conservation behavior).
 
-   If you’re unsure whether a change falls into this category, feel free to ask in the issue or PR thread before investing significant effort.
+   If you're unsure whether a change falls into this category, feel free to ask in the issue or PR thread before investing significant effort.
 5. **Commit your work**
     - Run automated checks locally:
     ```shell
@@ -155,25 +195,25 @@ Ptera Software now uses GitHub Flow to manage code contributions. If this is new
    This will open Nano, where you enter your commit message above the commented out `#` lines. Please follow best practices for commit messages. Below is a lightly adapted version of [Tim Pope's famous sample commit message](https://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html):
     ```shell
     Capitalized, short (50 chars or less) summary
-    
+
     More detailed explanatory text, if necessary. Wrap it to about 72
     characters or so. In some contexts, the first line is treated as the
     subject of an email and the rest of the text as the body. The blank
     line separating the summary from the body is critical (unless you omit
     the body entirely); tools like rebase can get confused if you run the
     two together.
-    
+
     Write your commit message in the imperative: "Fix bug" and not "Fixed
     bug" or "Fixes bug." This convention matches up with commit messages
     generated by commands like git merge and git revert.
-    
+
     Further paragraphs come after blank lines.
-    
+
     - Bullet points are okay, too
-    
+
     - Typically a hyphen or asterisk is used for the bullet, followed by a
       single space, with blank lines in between, but conventions vary here
-    
+
     - Use a hanging indent
     ```
    Once you are satisfied with your commit message, enter Ctrl+O and Ctrl+X to save and exit, which will trigger the commit. Alternatively, with an empty commit message, enter Ctrl+X to exit and abort the commit.

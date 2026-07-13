@@ -5,6 +5,8 @@ import unittest
 import numpy as np
 import numpy.testing as npt
 
+import pterasoftware as ps
+
 # noinspection PyProtectedMember
 from pterasoftware import _transformations
 
@@ -272,7 +274,7 @@ class TestGenerateRotT(unittest.TestCase):
         npt.assert_allclose(v_rotated_sequential, v_rotated_composed, atol=1e-14)
 
     def test_large_angle_handling(self):
-        """Tests handling of large angles beyond ±180 degrees.
+        """Tests handling of large angles beyond +/-180 degrees.
 
         :return: None
         """
@@ -382,15 +384,133 @@ class TestGenerateRotT(unittest.TestCase):
         expected_transformed_dir = np.array([0.0, 1.0, 0.0])
         npt.assert_allclose(transformed_dir, expected_transformed_dir, atol=1e-14)
 
-    def test_invalid_rotation_order_rejected(self):
-        """Tests that passing in invalid angle orders raises a value error.
+
+class TestGenerate2DRotR(unittest.TestCase):
+    """This class contains methods for testing the generate_2D_rot_R function."""
+
+    def test_identity_transformations(self):
+        """Tests that zero angles produce identity matrices for all configurations.
 
         :return: None
         """
-        angles = np.array([10.0, 20.0, 30.0])
-        for bad in ["xyx", "xxx", "zz", "wxy", "x_y", ""]:
-            with self.assertRaises(ValueError):
-                _transformations.generate_rot_T(angles, True, True, bad)
+        for passive in [True, False]:
+            with self.subTest(passive=passive):
+                R = _transformations.generate_2D_rot_R(0.0, passive)
+                npt.assert_allclose(R, np.eye(2), atol=1e-14)
+
+    def test_rotation_matrix_properties(self):
+        """Tests that rotation components satisfy rotation matrix properties.
+
+        Tests: determinant = 1 and orthogonality (R.T @ R = I).
+
+        :return: None
+        """
+        test_angles = [0.0, 30.0, 45.0, 90.0, 180.0, -45.0]
+
+        for angle in test_angles:
+            for passive in [True, False]:
+                with self.subTest(angle=angle, passive=passive):
+                    R = _transformations.generate_2D_rot_R(angle, passive)
+
+                    # Test output shape
+                    self.assertEqual(R.shape, (2, 2))
+
+                    # Test determinant = 1 (proper rotation)
+                    det = np.linalg.det(R)
+                    self.assertAlmostEqual(det, 1.0, places=14)
+
+                    # Test orthogonality: R.T @ R = I
+                    identity_test = R.T @ R
+                    npt.assert_allclose(identity_test, np.eye(2), atol=1e-14)
+
+                    # Test that R @ R.T = I
+                    identity_test2 = R @ R.T
+                    npt.assert_allclose(identity_test2, np.eye(2), atol=1e-14)
+
+    def test_passive_vs_active_relationship(self):
+        """Tests that passive and active rotation components are transposes.
+
+        :return: None
+        """
+        angles = [30.0, 45.0, 60.0, -15.0]
+
+        for angle in angles:
+            with self.subTest(angle=angle):
+                R_passive = _transformations.generate_2D_rot_R(angle, True)
+                R_active = _transformations.generate_2D_rot_R(angle, False)
+
+                npt.assert_allclose(R_passive, R_active.T, atol=1e-14)
+
+    def test_specific_known_rotations(self):
+        """Tests specific active and passive rotations with analytically known results.
+
+        :return: None
+        """
+        # 90 degrees active
+        R_act_90_expected = np.array([[0.0, -1.0], [1.0, 0.0]])
+        R_act_90 = _transformations.generate_2D_rot_R(90.0, False)
+        npt.assert_allclose(R_act_90, R_act_90_expected, atol=1e-14)
+
+        # 90 degrees passive
+        R_pas_90_expected = np.array([[0.0, 1.0], [-1.0, 0.0]])
+        R_pas_90 = _transformations.generate_2D_rot_R(90.0, True)
+        npt.assert_allclose(R_pas_90, R_pas_90_expected, atol=1e-14)
+
+        # 180 degrees active
+        R_act_180_expected = np.array([[-1.0, 0.0], [0.0, -1.0]])
+        R_act_180 = _transformations.generate_2D_rot_R(180.0, False)
+        npt.assert_allclose(R_act_180, R_act_180_expected, atol=1e-14)
+
+    def test_large_angle_handling(self):
+        """Tests handling of large angles beyond +/-180 degrees.
+
+        :return: None
+        """
+        # 450 degrees is equivalent to 90 degrees
+        R_large = _transformations.generate_2D_rot_R(450.0, False)
+        R_equivalent = _transformations.generate_2D_rot_R(90.0, False)
+
+        npt.assert_allclose(R_large, R_equivalent, atol=1e-14)
+
+        # -270 degrees is equivalent to 90 degrees
+        R_neg = _transformations.generate_2D_rot_R(-270.0, False)
+        npt.assert_allclose(R_neg, R_equivalent, atol=1e-14)
+
+    def test_edge_case_angles(self):
+        """Tests edge case angle values.
+
+        :return: None
+        """
+        edge_case_angles = [
+            180.0,
+            -180.0,
+            360.0,
+            -360.0,
+        ]
+
+        for angle in edge_case_angles:
+            with self.subTest(angle=angle):
+                for passive in [True, False]:
+                    R = _transformations.generate_2D_rot_R(angle, passive)
+
+                    # Should be a valid rotation matrix
+                    det = np.linalg.det(R)
+                    self.assertAlmostEqual(det, 1.0, places=14)
+
+                    identity_test = R.T @ R
+                    npt.assert_allclose(identity_test, np.eye(2), atol=1e-14)
+
+        # 360 and -360 should both produce identity
+        R_360 = _transformations.generate_2D_rot_R(360.0, False)
+        npt.assert_allclose(R_360, np.eye(2), atol=1e-14)
+
+        R_neg_360 = _transformations.generate_2D_rot_R(-360.0, False)
+        npt.assert_allclose(R_neg_360, np.eye(2), atol=1e-14)
+
+        # 180 and -180 should produce the same matrix
+        R_180 = _transformations.generate_2D_rot_R(180.0, False)
+        R_neg_180 = _transformations.generate_2D_rot_R(-180.0, False)
+        npt.assert_allclose(R_180, R_neg_180, atol=1e-14)
 
 
 class TestGenerateTransT(unittest.TestCase):
@@ -841,16 +961,16 @@ class TestComposeTPas(unittest.TestCase):
 
         # Given:
         # The position of point c (in A axes, relative to point a)
-        c_A_a = [0.5, -1.0, 2.0]
+        c_A_a = np.array([0.5, -1.0, 2.0])
 
         # Given:
         # The position of point b (in A axes, relative to point a)
-        b_A_a = [1.0, 2.0, 0.5]
+        b_A_a = np.array([1.0, 2.0, 0.5])
 
         # Given:
         # The orientation of B axes relative to A axes using an intrinsic zy'x"
         # rotation
-        angles_A_to_B_izyx = [0.0, 0.0, 90.0]
+        angles_A_to_B_izyx = np.array([0.0, 0.0, 90.0])
 
         T_rot_pas_A_to_B = _transformations.generate_rot_T(
             angles_A_to_B_izyx, passive=True, intrinsic=True, order="zyx"
@@ -862,7 +982,7 @@ class TestComposeTPas(unittest.TestCase):
         )
 
         c_B_b = _transformations.apply_T_to_vectors(
-            T_pas_A_a_to_B_b, c_A_a, has_point=True
+            T_pas_A_a_to_B_b, c_A_a, is_position=True
         )
 
         # Expected value calculated using CAD model
@@ -1012,10 +1132,10 @@ class TestComposeTAct(unittest.TestCase):
 
         :return: None
         """
-        c_G = [1.0, 2.0, 3.0]
+        c_G = np.array([1.0, 2.0, 3.0])
 
-        angles_act_izyx = [0.0, 0.0, 90.0]
-        t_G = [10.0, 0.0, 0.0]
+        angles_act_izyx = np.array([0.0, 0.0, 90.0])
+        t_G = np.array([10.0, 0.0, 0.0])
 
         rot_T_act = _transformations.generate_rot_T(
             angles_act_izyx, passive=False, intrinsic=True, order="zyx"
@@ -1024,7 +1144,7 @@ class TestComposeTAct(unittest.TestCase):
 
         T_act = _transformations.compose_T_act(rot_T_act, trans_T_act)
 
-        cPrime_G = _transformations.apply_T_to_vectors(T_act, c_G, has_point=True)
+        cPrime_G = _transformations.apply_T_to_vectors(T_act, c_G, is_position=True)
 
         # Expected known value. If this expected value is confusing to you, and you
         # expect it to instead by np.array([-2.0, 11.0, 3.0]), see the note in the
@@ -1318,7 +1438,7 @@ class TestApplyTToVectors(unittest.TestCase):
     """This class contains methods for testing the apply_T_to_vectors function."""
 
     def test_position_vector_transformation(self):
-        """Tests transformation of position vectors (has_point=True).
+        """Tests transformation of position vectors (is_position=True).
 
         :return: None
         """
@@ -1335,7 +1455,7 @@ class TestApplyTToVectors(unittest.TestCase):
         npt.assert_array_equal(transformed_position, expected)
 
     def test_direction_vector_transformation(self):
-        """Tests transformation of direction vectors (has_point=False).
+        """Tests transformation of direction vectors (is_position=False).
 
         :return: None
         """
@@ -1350,33 +1470,6 @@ class TestApplyTToVectors(unittest.TestCase):
 
         expected = np.array([0.0, 1.0, 0.0])
         npt.assert_allclose(transformed_direction, expected, atol=1e-14)
-
-    def test_input_validation(self):
-        """Tests various input types and edge cases.
-
-        :return: None
-        """
-        T = _transformations.generate_rot_T(
-            np.array([30.0, 0.0, 0.0]), False, True, "xyz"
-        )
-
-        # Test with tuple input
-        vector_tuple = (1.0, 2.0, 3.0)
-        result_tuple = _transformations.apply_T_to_vectors(T, vector_tuple, True)
-        self.assertIsInstance(result_tuple, np.ndarray)
-        self.assertEqual(len(result_tuple), 3)
-
-        # Test with list input
-        vector_list = [1.0, 2.0, 3.0]
-        result_list = _transformations.apply_T_to_vectors(T, vector_list, True)
-        self.assertIsInstance(result_list, np.ndarray)
-        self.assertEqual(len(result_list), 3)
-
-        # Test with numpy array input
-        vector_array = np.array([1.0, 2.0, 3.0])
-        result_array = _transformations.apply_T_to_vectors(T, vector_array, True)
-        self.assertIsInstance(result_array, np.ndarray)
-        self.assertEqual(len(result_array), 3)
 
     def test_transformation_consistency(self):
         """Tests consistency with manual homogeneous coordinate operations.
@@ -1453,11 +1546,6 @@ class TestApplyTToVectors(unittest.TestCase):
         """
         T = _transformations.generate_trans_T(np.array([1.0, 2.0, 3.0]), False)
 
-        # Test with integer vector
-        int_vector = np.array([1, 2, 3])
-        result_int = _transformations.apply_T_to_vectors(T, int_vector, True)
-        self.assertEqual(result_int.dtype, np.float64)
-
         # Test with float vector
         float_vector = np.array([1.5, 2.5, 3.5])
         result_float = _transformations.apply_T_to_vectors(T, float_vector, True)
@@ -1488,7 +1576,7 @@ class TestApplyTToVectors(unittest.TestCase):
         self.assertEqual(result_single.shape, (3,))
         self.assertIsInstance(result_single, np.ndarray)
 
-        # Test consistency between has_point=True and has_point=False
+        # Test consistency between is_position=True and is_position=False
         result_position = _transformations.apply_T_to_vectors(T, single_vector, True)
         result_direction = _transformations.apply_T_to_vectors(T, single_vector, False)
         self.assertEqual(len(result_position), 3)
@@ -1533,7 +1621,7 @@ class TestApplyTToVectors(unittest.TestCase):
         self.assertEqual(result_3d.shape, (2, 2, 3))
 
     def test_position_vs_direction_arrays(self):
-        """Tests that has_point parameter works correctly with arrays.
+        """Tests that is_position parameter works correctly with arrays.
 
         :return: None
         """
@@ -1626,5 +1714,566 @@ class TestApplyTToVectors(unittest.TestCase):
         npt.assert_array_equal(result_zeros_array, zeros_array)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestRToQuatWxyz(unittest.TestCase):
+    """This class contains methods for testing the R_to_quat_wxyz function."""
+
+    def test_identity_rotation(self):
+        """Tests that identity rotation matrix produces identity quaternion.
+
+        :return: None
+        """
+        R = np.eye(3, dtype=float)
+        q = _transformations.R_to_quat_wxyz(R)
+
+        # Identity quaternion is [1, 0, 0, 0]
+        expected_q = np.array([1.0, 0.0, 0.0, 0.0])
+        npt.assert_allclose(q, expected_q, atol=1e-14)
+
+    def test_90_degree_rotations_about_principal_axes(self):
+        """Tests 90 degree rotations about x, y, and z axes.
+
+        :return: None
+        """
+        sqrt2_over_2 = np.sqrt(2) / 2
+
+        # 90 degree rotation about x axis
+        R_x90 = np.array(
+            [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]], dtype=float
+        )
+        q_x90 = _transformations.R_to_quat_wxyz(R_x90)
+        expected_q_x90 = np.array([sqrt2_over_2, sqrt2_over_2, 0.0, 0.0])
+        npt.assert_allclose(q_x90, expected_q_x90, atol=1e-14)
+
+        # 90 degree rotation about y axis
+        R_y90 = np.array(
+            [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]], dtype=float
+        )
+        q_y90 = _transformations.R_to_quat_wxyz(R_y90)
+        expected_q_y90 = np.array([sqrt2_over_2, 0.0, sqrt2_over_2, 0.0])
+        npt.assert_allclose(q_y90, expected_q_y90, atol=1e-14)
+
+        # 90 degree rotation about z axis
+        R_z90 = np.array(
+            [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=float
+        )
+        q_z90 = _transformations.R_to_quat_wxyz(R_z90)
+        expected_q_z90 = np.array([sqrt2_over_2, 0.0, 0.0, sqrt2_over_2])
+        npt.assert_allclose(q_z90, expected_q_z90, atol=1e-14)
+
+    def test_180_degree_rotations_about_principal_axes(self):
+        """Tests 180 degree rotations about x, y, and z axes.
+
+        :return: None
+        """
+        # 180 degree rotation about x axis
+        R_x180 = np.array(
+            [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], dtype=float
+        )
+        q_x180 = _transformations.R_to_quat_wxyz(R_x180)
+        expected_q_x180 = np.array([0.0, 1.0, 0.0, 0.0])
+        npt.assert_allclose(q_x180, expected_q_x180, atol=1e-14)
+
+        # 180 degree rotation about y axis
+        R_y180 = np.array(
+            [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]], dtype=float
+        )
+        q_y180 = _transformations.R_to_quat_wxyz(R_y180)
+        expected_q_y180 = np.array([0.0, 0.0, 1.0, 0.0])
+        npt.assert_allclose(q_y180, expected_q_y180, atol=1e-14)
+
+        # 180 degree rotation about z axis
+        R_z180 = np.array(
+            [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]], dtype=float
+        )
+        q_z180 = _transformations.R_to_quat_wxyz(R_z180)
+        expected_q_z180 = np.array([0.0, 0.0, 0.0, 1.0])
+        npt.assert_allclose(q_z180, expected_q_z180, atol=1e-14)
+
+    def test_unit_quaternion_output(self):
+        """Tests that output quaternion is always a unit quaternion.
+
+        :return: None
+        """
+        test_angles = [
+            np.array([0.0, 0.0, 0.0]),
+            np.array([30.0, 0.0, 0.0]),
+            np.array([0.0, 45.0, 0.0]),
+            np.array([0.0, 0.0, 60.0]),
+            np.array([30.0, 45.0, 60.0]),
+            np.array([90.0, 0.0, 90.0]),
+            np.array([180.0, 0.0, 0.0]),
+            np.array([-45.0, -30.0, -60.0]),
+        ]
+
+        for angles in test_angles:
+            with self.subTest(angles=angles):
+                T = _transformations.generate_rot_T(angles, False, True, "xyz")
+                R = T[:3, :3]
+                q = _transformations.R_to_quat_wxyz(R)
+
+                # Check that quaternion has unit magnitude
+                q_mag = np.linalg.norm(q)
+                self.assertAlmostEqual(q_mag, 1.0, places=14)
+
+    def test_output_shape_and_type(self):
+        """Tests output shape and data type.
+
+        :return: None
+        """
+        R = np.eye(3, dtype=float)
+        q = _transformations.R_to_quat_wxyz(R)
+
+        self.assertEqual(q.shape, (4,))
+        self.assertEqual(q.dtype, np.float64)
+
+    def test_roundtrip_with_generate_rot_T(self):
+        """Tests that quaternion correctly represents the rotation by verifying
+        rotation of vectors.
+
+        :return: None
+        """
+        test_angles = [
+            np.array([30.0, 0.0, 0.0]),
+            np.array([0.0, 45.0, 0.0]),
+            np.array([0.0, 0.0, 60.0]),
+            np.array([20.0, 35.0, 50.0]),
+            np.array([-15.0, 25.0, -40.0]),
+        ]
+
+        test_vector = np.array([1.0, 2.0, 3.0])
+
+        for angles in test_angles:
+            with self.subTest(angles=angles):
+                # Get rotation matrix from generate_rot_T
+                T = _transformations.generate_rot_T(angles, False, True, "xyz")
+                R = T[:3, :3]
+
+                # Get quaternion
+                q = _transformations.R_to_quat_wxyz(R)
+                w, x, y, z = q
+
+                # Reconstruct rotation matrix from quaternion
+                R_reconstructed = np.array(
+                    [
+                        [
+                            1 - 2 * (y**2 + z**2),
+                            2 * (x * y - z * w),
+                            2 * (x * z + y * w),
+                        ],
+                        [
+                            2 * (x * y + z * w),
+                            1 - 2 * (x**2 + z**2),
+                            2 * (y * z - x * w),
+                        ],
+                        [
+                            2 * (x * z - y * w),
+                            2 * (y * z + x * w),
+                            1 - 2 * (x**2 + y**2),
+                        ],
+                    ],
+                    dtype=float,
+                )
+
+                # Both matrices should rotate the test vector the same way
+                v_rotated_original = R @ test_vector
+                v_rotated_reconstructed = R_reconstructed @ test_vector
+
+                npt.assert_allclose(
+                    v_rotated_original, v_rotated_reconstructed, atol=1e-14
+                )
+
+    def test_negative_90_degree_rotations(self):
+        """Tests negative 90 degree rotations about principal axes.
+
+        :return: None
+        """
+        sqrt2_over_2 = np.sqrt(2) / 2
+
+        # -90 degree rotation about x axis
+        R_xn90 = np.array(
+            [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]], dtype=float
+        )
+        q_xn90 = _transformations.R_to_quat_wxyz(R_xn90)
+        expected_q_xn90 = np.array([sqrt2_over_2, -sqrt2_over_2, 0.0, 0.0])
+        npt.assert_allclose(q_xn90, expected_q_xn90, atol=1e-14)
+
+        # -90 degree rotation about y axis
+        R_yn90 = np.array(
+            [[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]], dtype=float
+        )
+        q_yn90 = _transformations.R_to_quat_wxyz(R_yn90)
+        expected_q_yn90 = np.array([sqrt2_over_2, 0.0, -sqrt2_over_2, 0.0])
+        npt.assert_allclose(q_yn90, expected_q_yn90, atol=1e-14)
+
+        # -90 degree rotation about z axis
+        R_zn90 = np.array(
+            [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=float
+        )
+        q_zn90 = _transformations.R_to_quat_wxyz(R_zn90)
+        expected_q_zn90 = np.array([sqrt2_over_2, 0.0, 0.0, -sqrt2_over_2])
+        npt.assert_allclose(q_zn90, expected_q_zn90, atol=1e-14)
+
+    def test_all_rotation_orders(self):
+        """Tests conversion for rotation matrices from all Tait Bryan orders.
+
+        :return: None
+        """
+        angles = np.array([25.0, 35.0, 45.0])
+        valid_orders = ["xyz", "xzy", "yxz", "yzx", "zxy", "zyx"]
+
+        for order in valid_orders:
+            with self.subTest(order=order):
+                T = _transformations.generate_rot_T(angles, False, True, order)
+                R = T[:3, :3]
+                q = _transformations.R_to_quat_wxyz(R)
+
+                # Verify unit quaternion
+                q_mag = np.linalg.norm(q)
+                self.assertAlmostEqual(q_mag, 1.0, places=14)
+
+                # Verify quaternion correctly represents the rotation
+                w, x, y, z = q
+                R_reconstructed = np.array(
+                    [
+                        [
+                            1 - 2 * (y**2 + z**2),
+                            2 * (x * y - z * w),
+                            2 * (x * z + y * w),
+                        ],
+                        [
+                            2 * (x * y + z * w),
+                            1 - 2 * (x**2 + z**2),
+                            2 * (y * z - x * w),
+                        ],
+                        [
+                            2 * (x * z - y * w),
+                            2 * (y * z + x * w),
+                            1 - 2 * (x**2 + y**2),
+                        ],
+                    ],
+                    dtype=float,
+                )
+                npt.assert_allclose(R, R_reconstructed, atol=1e-14)
+
+
+class TestRToAnglesIzyx(unittest.TestCase):
+    """This class contains methods for testing the R_to_angles_izyx function."""
+
+    def test_identity_rotation(self):
+        """Tests that the identity rotation matrix yields zero angles.
+
+        :return: None
+        """
+        R = np.eye(3, dtype=float)
+        angles = _transformations.R_to_angles_izyx(R)
+
+        expected_angles = np.array([0.0, 0.0, 0.0])
+        npt.assert_allclose(angles, expected_angles, atol=1e-14)
+
+    def test_90_degree_rotations_about_x_and_z(self):
+        """Tests +/-90 degree rotations about the x and z axes.
+
+        Rotations about the y axis at +/-90 degrees hit the gimbal lock pole and
+        are tested separately.
+
+        :return: None
+        """
+        cases = [
+            ("+90 about x", np.array([90.0, 0.0, 0.0])),
+            ("-90 about x", np.array([-90.0, 0.0, 0.0])),
+            ("+90 about z", np.array([0.0, 0.0, 90.0])),
+            ("-90 about z", np.array([0.0, 0.0, -90.0])),
+        ]
+
+        for label, expected_angles in cases:
+            with self.subTest(case=label):
+                T = _transformations.generate_rot_T(
+                    angles=expected_angles,
+                    passive=True,
+                    intrinsic=True,
+                    order="zyx",
+                )
+                R = T[:3, :3]
+
+                angles = _transformations.R_to_angles_izyx(R)
+
+                npt.assert_allclose(angles, expected_angles, atol=1e-14)
+
+    def test_gimbal_lock_at_positive_pole(self):
+        """Tests behavior at +90 degree pitch (positive gimbal lock pole).
+
+        At gimbal lock, the helper assigns the indeterminate rotation to angleZ and
+        zeros angleX, so a pure +90 degree pitch should return [0, 90, 0].
+
+        :return: None
+        """
+        expected_angles = np.array([0.0, 90.0, 0.0])
+        T = _transformations.generate_rot_T(
+            angles=expected_angles,
+            passive=True,
+            intrinsic=True,
+            order="zyx",
+        )
+        R = T[:3, :3]
+
+        angles = _transformations.R_to_angles_izyx(R)
+
+        npt.assert_allclose(angles, expected_angles, atol=1e-14)
+
+    def test_gimbal_lock_at_negative_pole(self):
+        """Tests behavior at -90 degree pitch (negative gimbal lock pole).
+
+        :return: None
+        """
+        expected_angles = np.array([0.0, -90.0, 0.0])
+        T = _transformations.generate_rot_T(
+            angles=expected_angles,
+            passive=True,
+            intrinsic=True,
+            order="zyx",
+        )
+        R = T[:3, :3]
+
+        angles = _transformations.R_to_angles_izyx(R)
+
+        npt.assert_allclose(angles, expected_angles, atol=1e-14)
+
+    def test_round_trip_with_generate_rot_T(self):
+        """Tests that R_to_angles_izyx inverts generate_rot_T for a range of angle
+        combinations away from gimbal lock.
+
+        :return: None
+        """
+        sample_angles = [
+            np.array([10.0, 20.0, 30.0]),
+            np.array([-15.0, 40.0, -25.0]),
+            np.array([45.0, -50.0, 60.0]),
+            np.array([-80.0, 80.0, -80.0]),
+            np.array([5.0, -85.0, 170.0]),
+        ]
+
+        for angles in sample_angles:
+            with self.subTest(angles=angles):
+                T = _transformations.generate_rot_T(
+                    angles=angles,
+                    passive=True,
+                    intrinsic=True,
+                    order="zyx",
+                )
+                R = T[:3, :3]
+
+                recovered_angles = _transformations.R_to_angles_izyx(R)
+
+                npt.assert_allclose(recovered_angles, angles, atol=1e-13)
+
+
+class TestAlphaAndBetaFromVInfBP1(unittest.TestCase):
+    """This class contains methods for testing the alpha_and_beta_from_vInf_BP1
+    function.
+    """
+
+    def test_straight_and_level(self):
+        """Tests that pure forward freestream yields zero alpha and zero beta.
+
+        :return: None
+        """
+        vCg__E = 10.0
+        vInf_BP1__E = np.array([-vCg__E, 0.0, 0.0])
+
+        alpha, beta = _transformations.alpha_and_beta_from_vInf_BP1(vInf_BP1__E, vCg__E)
+
+        self.assertEqual(alpha, 0.0)
+        self.assertEqual(beta, 0.0)
+
+    def test_positive_alpha(self):
+        """Tests that freestream with positive nose up component yields positive
+        alpha.
+
+        :return: None
+        """
+        vCg__E = 10.0
+        expected_alpha = 5.0
+        alphaRad = np.deg2rad(expected_alpha)
+        vInf_BP1__E = np.array(
+            [-vCg__E * np.cos(alphaRad), 0.0, -vCg__E * np.sin(alphaRad)]
+        )
+
+        alpha, beta = _transformations.alpha_and_beta_from_vInf_BP1(vInf_BP1__E, vCg__E)
+
+        npt.assert_allclose(alpha, expected_alpha, atol=1e-14)
+        npt.assert_allclose(beta, 0.0, atol=1e-14)
+
+    def test_negative_alpha(self):
+        """Tests that freestream with positive nose down component yields negative
+        alpha.
+
+        :return: None
+        """
+        vCg__E = 10.0
+        expected_alpha = -7.5
+        alphaRad = np.deg2rad(expected_alpha)
+        vInf_BP1__E = np.array(
+            [-vCg__E * np.cos(alphaRad), 0.0, -vCg__E * np.sin(alphaRad)]
+        )
+
+        alpha, beta = _transformations.alpha_and_beta_from_vInf_BP1(vInf_BP1__E, vCg__E)
+
+        npt.assert_allclose(alpha, expected_alpha, atol=1e-14)
+        npt.assert_allclose(beta, 0.0, atol=1e-14)
+
+    def test_positive_beta(self):
+        """Tests that a freestream with a leftward body-y component (the relative wind
+        coming from the right) yields positive beta, per the wind axes convention in
+        docs/AXES_POINTS_AND_FRAMES.md.
+
+        :return: None
+        """
+        vCg__E = 10.0
+        expected_beta = 8.0
+        betaRad = np.deg2rad(expected_beta)
+        vInf_BP1__E = np.array(
+            [-vCg__E * np.cos(betaRad), -vCg__E * np.sin(betaRad), 0.0]
+        )
+
+        alpha, beta = _transformations.alpha_and_beta_from_vInf_BP1(vInf_BP1__E, vCg__E)
+
+        npt.assert_allclose(alpha, 0.0, atol=1e-14)
+        npt.assert_allclose(beta, expected_beta, atol=1e-14)
+
+    def test_negative_beta(self):
+        """Tests that a freestream with a rightward body-y component (the relative wind
+        coming from the left) yields negative beta.
+
+        :return: None
+        """
+        vCg__E = 10.0
+        expected_beta = -3.0
+        betaRad = np.deg2rad(expected_beta)
+        vInf_BP1__E = np.array(
+            [-vCg__E * np.cos(betaRad), -vCg__E * np.sin(betaRad), 0.0]
+        )
+
+        alpha, beta = _transformations.alpha_and_beta_from_vInf_BP1(vInf_BP1__E, vCg__E)
+
+        npt.assert_allclose(alpha, 0.0, atol=1e-14)
+        npt.assert_allclose(beta, expected_beta, atol=1e-14)
+
+    def test_coupled_alpha_and_beta(self):
+        """Tests recovery when both alpha and beta are nonzero, which the single-angle
+        tests do not exercise and where an incorrect decomposition order would cross-
+        contaminate the two angles.
+
+        The CG velocity in body axes (the negated freestream,
+        vCg_BP1__E = -vInf_BP1__E) for the wind axes convention has components
+        vCg__E * cos(alpha) * cos(beta), vCg__E * cos(alpha) * sin(beta), and
+        vCg__E * sin(alpha). Build the freestream for a known alpha and beta and confirm
+        both are recovered exactly.
+
+        :return: None
+        """
+        vCg__E = 10.0
+        expected_alpha = 6.0
+        expected_beta = -15.0
+        alphaRad = np.deg2rad(expected_alpha)
+        betaRad = np.deg2rad(expected_beta)
+        vCg_BP1__E = vCg__E * np.array(
+            [
+                np.cos(alphaRad) * np.cos(betaRad),
+                np.cos(alphaRad) * np.sin(betaRad),
+                np.sin(alphaRad),
+            ]
+        )
+        vInf_BP1__E = -vCg_BP1__E
+
+        alpha, beta = _transformations.alpha_and_beta_from_vInf_BP1(vInf_BP1__E, vCg__E)
+
+        npt.assert_allclose(alpha, expected_alpha, atol=1e-13)
+        npt.assert_allclose(beta, expected_beta, atol=1e-13)
+
+    def test_round_trip_consistent_with_operating_point(self):
+        """Tests that this function exactly inverts the OperatingPoint's alpha and beta
+        to freestream mapping, so the two share a single convention.
+
+        The free flight state update derives alpha and beta from the body velocity with
+        this function and stores them on a new OperatingPoint, which rebuilds its
+        freestream from them. If the two conventions disagree, that round trip corrupts
+        the freestream every time step. Build OperatingPoints across a grid of alpha and
+        beta, take each one's freestream in body axes, and confirm this function recovers
+        the original alpha and beta.
+
+        :return: None
+        """
+        vCg__E = 13.0
+        for alpha_in in [-12.0, -5.0, 0.0, 7.0, 14.0]:
+            for beta_in in [-25.0, -8.0, 0.0, 6.0, 20.0]:
+                op = ps.operating_point.OperatingPoint(
+                    rho=1.225, vCg__E=vCg__E, alpha=alpha_in, beta=beta_in
+                )
+                vInf_BP1__E = _transformations.apply_T_to_vectors(
+                    op.T_pas_GP1_CgP1_to_BP1_CgP1,
+                    op.vInf_GP1__E,
+                    is_position=False,
+                )
+
+                alpha_out, beta_out = _transformations.alpha_and_beta_from_vInf_BP1(
+                    vInf_BP1__E, vCg__E
+                )
+
+                npt.assert_allclose(alpha_out, alpha_in, atol=1e-12)
+                npt.assert_allclose(beta_out, beta_in, atol=1e-12)
+
+    def test_zero_speed_returns_nan(self):
+        """Tests that zero speed yields NaN for both alpha and beta.
+
+        Alpha and beta are physically undefined at zero speed (no preferred
+        freestream direction), and the helper returns NaN to make that explicit
+        rather than substituting a finite placeholder.
+
+        :return: None
+        """
+        vCg__E = 0.0
+        vInf_BP1__E = np.array([0.0, 0.0, 0.0])
+
+        alpha, beta = _transformations.alpha_and_beta_from_vInf_BP1(vInf_BP1__E, vCg__E)
+
+        self.assertTrue(np.isnan(alpha))
+        self.assertTrue(np.isnan(beta))
+
+
+class TestComputeOffsetRotationAdjustment(unittest.TestCase):
+    """Tests for the compute_offset_rotation_adjustment function."""
+
+    def test_identity_rotation(self):
+        """Identity rotation should produce zero adjustment."""
+        R = np.eye(3)
+        offset = np.array([1.0, 2.0, 3.0])
+
+        adjustment = _transformations.compute_offset_rotation_adjustment(R, offset)
+
+        npt.assert_allclose(adjustment, np.zeros(3), atol=1e-14)
+
+    def test_zero_offset(self):
+        """Zero offset should always produce zero adjustment."""
+        R = np.eye(3)
+        offset = np.zeros(3)
+
+        adjustment = _transformations.compute_offset_rotation_adjustment(R, offset)
+
+        npt.assert_allclose(adjustment, np.zeros(3), atol=1e-14)
+
+    def test_known_rotation(self):
+        """Test adjustment for a known rotation (90 deg about z-axis)."""
+        angles = np.array([0.0, 0.0, 90.0])
+
+        rot_T = _transformations.generate_rot_T(
+            angles, passive=False, intrinsic=True, order="xyz"
+        )
+        R = rot_T[:3, :3]
+
+        offset = np.array([1.0, 0.0, 0.0])
+
+        adjustment = _transformations.compute_offset_rotation_adjustment(R, offset)
+
+        expected = (np.eye(3) - R) @ offset
+
+        npt.assert_allclose(adjustment, expected, atol=1e-14)

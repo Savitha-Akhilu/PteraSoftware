@@ -2,18 +2,18 @@
 
 ***
 
+[![DOI](https://img.shields.io/badge/DOI-10.5281/zenodo.19229119-blue)](https://doi.org/10.5281/zenodo.19229119)
+![license](https://img.shields.io/badge/license-MIT-blue)
 ![build](https://github.com/camUrban/PteraSoftware/actions/workflows/tests.yml/badge.svg?branch=main)
 ![coverage](https://img.shields.io/codecov/c/gh/camUrban/PteraSoftware)
-![code quality](https://img.shields.io/codefactor/grade/github/camUrban/PteraSoftware)
-![source rank](https://img.shields.io/librariesio/sourcerank/pypi/PteraSoftware?color=blue&label=source%20rank)
 ![python](https://img.shields.io/pypi/pyversions/pterasoftware)
-![license](https://img.shields.io/github/license/camUrban/PteraSoftware?color=blue)
 ![types](https://img.shields.io/pypi/types/pterasoftware)
-![code style](https://img.shields.io/badge/code%20style-black-black)
+![code style](https://img.shields.io/badge/code_style-black-black)
+![source rank](https://img.shields.io/librariesio/sourcerank/pypi/PteraSoftware?color=blue&label=source%20rank)
 
 ***
 <!-- docs-include-start -->
-![Example Unsteady Formation Flight](https://raw.githubusercontent.com/camUrban/PteraSoftware/main/docs/examples_expected_output/unsteady_ring_vortex_lattice_method_solver_variable_formation/Animate.webp)
+![Flapping Wings in Ground Effect](https://raw.githubusercontent.com/camUrban/PteraSoftware/main/docs/hero_graphics/hero_animated.webp)
 
 This is Ptera Software: a fast, easy-to-use, and open-source package for analyzing flapping-wing flight.
 
@@ -82,6 +82,7 @@ ps.output.draw(solver=solver, scalar_type="lift", show_streamlines=True)
     * Unsteady simulations use a ring unsteady VLM (UVLM) solver.
     * Unsteady simulations support both fixed and free wakes.
     * Unsteady simulations implement vortex aging to reduce numerical instabilities.
+    * All three solvers support surface effects (e.g., ground effect) via the method of images.
 2. Customizable Aircraft Geometry
     * Aircraft can be defined as a collection of one or more wings of any dimensions and positions.
     * Wings can be defined as a collection of two or more wing cross sections of any dimensions and positions.
@@ -98,11 +99,22 @@ ps.output.draw(solver=solver, scalar_type="lift", show_streamlines=True)
 6. Simulations of Formation Flight
     * Since v2.0.0, Ptera Software has supported simulations with more than one airplane.
     * This feature can be used to analyze the aerodynamics of flapping-wing formation flight!
-7. Features for Flapping-Wing Vehicle Design
+7. Save and Load Simulation Results
+    * Save solved simulations to JSON files and load them back without re-running.
+    * Uses JSON serialization instead of pickle, avoiding arbitrary code execution vulnerabilities.
+    * Supports gzip compression for reduced file sizes.
+    * Loaded objects are fully compatible with all output and visualization functions.
+8. Features for Flapping-Wing Vehicle Design
     * Ptera Software is focused on developing features to facilitate designing flapping-wing vehicles.
     * For example, use the functions in the trim module to automatically search for a trim operating point for steady and unsteady simulations of aircraft.
-8. A Basic GUI
-    * This is still in its alpha stage, but we will be adding more functionality soon.
+9. Aeroelastic Module for Flapping Flight (Beta)
+    * This feature enables co-simulation of structural wing deformation and standard Ptera Software UVLM calculations.
+    * Currently the feature offers a simple torsional spring model for each WingCrossSection.
+    * Experimental validation and improved deformation models coming soon.
+10. Free Flight Module (Beta)
+    * This feature couples Ptera Software's UVLM with six-degree-of-freedom rigid body dynamics, using the MuJoCo physics engine, so an aircraft flies a free trajectory under its own aerodynamic loads, weight, and inertia.
+    * The body's motion updates the aerodynamics at every time step, capturing the two-way coupling between flight dynamics and unsteady aerodynamics.
+    * Currently this feature supports single-airplane free flight.
 
 ## Installation
 
@@ -114,29 +126,35 @@ If you haven't already, install Ptera Software from PyPI (see [Quick Start](#qui
 pip install pterasoftware
 ```
 
-Your IDE should automatically provide docstring hints for the available classes and functions. For more detailed documentation, visit the [Ptera Software documentation site](https://pterasoftware.readthedocs.io/).
+Your IDE should automatically provide docstring hints for the available classes and functions. For more detailed documentation, visit the [Ptera Software documentation site](https://docs.pterasoftware.com/).
 
 ### From Source
 
 If you want to browse the example scripts or dig into the source code, you will need a local copy of the repository. Follow the environment setup instructions in the [Contributing Guidelines](CONTRIBUTING.md#contributing-code) to clone the repository, create a virtual environment, and install dependencies.
 
-Once set up, the `examples/` directory contains scripts that demonstrate the full range of Ptera Software's features and solvers.
+Once set up, the `examples/` directory contains scripts that demonstrate the full range of Ptera Software's features and solvers. These scripts are also available on the [documentation site](https://docs.pterasoftware.com/en/latest/examples.html).
 
 ## Example Output
 
-This package currently supports three different solvers, a steady horseshoe VLM, a steady ring VLM, and an unsteady ring VLM (UVLM). Here are examples of the output you can expect to receive from each of them.
+This package currently supports five different solvers, a steady horseshoe VLM, a steady ring VLM, an unsteady ring VLM (UVLM), an aeroelastic unsteady ring VLM, and a free flight unsteady ring VLM. Here are examples of the output you can expect to receive from each of them.
 
 ### Steady Horseshoe VLM
 
-![Example Steady Horseshoe VLM Output](https://raw.githubusercontent.com/camUrban/PteraSoftware/main/docs/examples_expected_output/steady_horseshoe_vortex_lattice_method_solver/Draw.webp)
+![Example Steady Horseshoe VLM Output](https://raw.githubusercontent.com/camUrban/PteraSoftware/main/docs/examples_expected_output/steady_horseshoe_vortex_lattice_method_solver/draw.webp)
 
 ### Steady Ring VLM
 
-![Example Steady Ring VLM Output](https://raw.githubusercontent.com/camUrban/PteraSoftware/main/docs/examples_expected_output/steady_ring_vortex_lattice_method_solver/Draw.webp)
+![Example Steady Ring VLM Output](https://raw.githubusercontent.com/camUrban/PteraSoftware/main/docs/examples_expected_output/steady_ring_vortex_lattice_method_solver/draw.webp)
 
 ### Unsteady Ring VLM
 
-![Example Unsteady Ring VLM Animation Output](https://raw.githubusercontent.com/camUrban/PteraSoftware/main/docs/examples_expected_output/unsteady_ring_vortex_lattice_method_solver_static/Animate.webp)
+![Example Unsteady Ring VLM Animation Output](https://raw.githubusercontent.com/camUrban/PteraSoftware/main/docs/examples_expected_output/unsteady_ring_vortex_lattice_method_solver_static/animate.webp)
+
+### Aeroelastic Unsteady Ring VLM
+![Example Aeroelastic Unsteady Ring VLM Animation Output](https://raw.githubusercontent.com/camUrban/PteraSoftware/main/docs/examples_expected_output/aeroelastic_unsteady_first_order_deformation/animate.webp)
+
+### Free Flight Unsteady Ring VLM
+![Example Free Flight Unsteady Ring VLM Animation Output](https://raw.githubusercontent.com/camUrban/PteraSoftware/main/docs/examples_expected_output/free_flight_unsteady_ring_vortex_lattice_method_solver_flapping/animate.webp)
 
 ## Validation
 
@@ -144,7 +162,7 @@ Since the release of version 1.0.0, Ptera Software is now validated against expe
 
 ## Documentation
 
-For detailed API documentation and guides, visit the [Ptera Software documentation site](https://pterasoftware.readthedocs.io/).
+For detailed API documentation and guides, visit the [Ptera Software documentation site](https://docs.pterasoftware.com/).
 
 ## How to Contribute
 
@@ -159,6 +177,12 @@ Before contributing, make sure to read through the [Contributing Guidelines](CON
 * Jonah Jaffe ([JonahJ27](https://github.com/JonahJ27))
 * Venkata Akhil Mettu ([AKHIL-149](https://github.com/AKHIL-149))
 * Savitha N ([Savitha-Akhilu](https://github.com/Savitha-Akhilu))
+* Pedro Bornia ([BorniaPedro](https://github.com/BorniaPedro))
+* Mohamed Abdulghany ([MohamedMG7](https://github.com/MohamedMG7))
+* Hang Haotian ([haotianh9](https://github.com/haotianh9))
+* Monisha Sikka ([20086080](https://github.com/20086080))
+* Cameron Hendrikse ([MonoChromatical](https://github.com/MonoChromatical))
+* Abdullah Imran ([codexabdullah](https://github.com/codexabdullah))
 
 ### Supporters
 

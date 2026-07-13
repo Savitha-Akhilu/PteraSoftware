@@ -16,6 +16,9 @@ include = '\.pyi?$'
 ignore-words = ".codespell-ignore.txt"
 skip = "docs/_build/*,*.dat"
 
+[tool.coverage.run]
+source = ["pterasoftware"]
+
 [tool.docformatter]
 black = true
 recursive = true

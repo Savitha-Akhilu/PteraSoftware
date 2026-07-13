@@ -1,5 +1,6 @@
 """This module contains classes to test Wings."""
 
+import copy
 import unittest
 
 import numpy as np
@@ -22,9 +23,7 @@ class TestWing(unittest.TestCase):
         self.type_5_wing = geometry_fixtures.make_type_5_wing_fixture()
 
         # Create additional test fixtures
-        self.test_airfoil = geometry_fixtures.make_test_airfoil_fixture()
         self.root_wcs = geometry_fixtures.make_root_wing_cross_section_fixture()
-        self.tip_wcs = geometry_fixtures.make_tip_wing_cross_section_fixture()
 
     def test_initialization_valid_parameters(self):
         """Test Wing initialization with valid parameters for all types."""
@@ -166,6 +165,45 @@ class TestWing(unittest.TestCase):
             wing.symmetryNormal_G, np.array([0.0, np.sqrt(2) / 2, np.sqrt(2) / 2])
         )
         npt.assert_array_equal(wing.symmetryPoint_G_Cg, np.array([0.5, 0.0, 0.0]))
+
+    def test_symmetric_wing_panel_normals_mirror_across_symmetry_plane(self):
+        """Test that a symmetric Wing's panel normals mirror correctly across its xz
+        symmetry plane.
+
+        Each panel at +y has a partner at -y whose unit normal is the source normal with
+        only its y component negated. This pins the inner-outer corner swap in the
+        mirrored-wing meshing, which keeps the recomputed normals correctly oriented;
+        reflecting the corner points without that swap would negate the normal's x and z
+        components instead.
+        """
+        wing = geometry_fixtures.make_symmetric_dihedral_wing_fixture()
+        wing.generate_mesh(4)
+        panels = wing.panels.flatten()
+
+        centroids = np.array(
+            [
+                (panel.Frpp_G_Cg + panel.Flpp_G_Cg + panel.Brpp_G_Cg + panel.Blpp_G_Cg)
+                / 4.0
+                for panel in panels
+            ]
+        )
+        normals = np.array([panel.unitNormal_G for panel in panels])
+
+        # The dihedral should give the normals a non-trivial spanwise component, so the
+        # y-flip below is a meaningful check rather than an identity.
+        self.assertGreater(np.max(np.abs(normals[:, 1])), 0.1)
+
+        # Reflection across the xz (y = 0) symmetry plane negates only the y component.
+        y_flip = np.array([1.0, -1.0, 1.0])
+        for centroid, normal in zip(centroids, normals):
+            distances = np.linalg.norm(centroids - centroid * y_flip, axis=1)
+            partner = int(np.argmin(distances))
+
+            # A true mirror partner exists across the y = 0 plane.
+            self.assertLess(distances[partner], 1e-9)
+
+            # The mirror partner's normal is this normal with its y component negated.
+            npt.assert_allclose(normals[partner], normal * y_flip, atol=1e-10)
 
     def test_generate_mesh_symmetry_type_1(self):
         """Test generate_mesh method with type 1 symmetry."""
@@ -388,6 +426,33 @@ class TestWing(unittest.TestCase):
                 chordwise_spacing="invalid_spacing",
             )
 
+        # Test invalid symmetric
+        root_wcs = geometry_fixtures.make_root_wing_cross_section_fixture()
+        tip_wcs = geometry_fixtures.make_tip_wing_cross_section_fixture()
+        with self.assertRaises(TypeError):
+            # noinspection PyTypeChecker
+            ps.geometry.wing.Wing(
+                wing_cross_sections=[root_wcs, tip_wcs], symmetric="invalid"
+            )
+
+        # Test invalid mirror_only
+        root_wcs = geometry_fixtures.make_root_wing_cross_section_fixture()
+        tip_wcs = geometry_fixtures.make_tip_wing_cross_section_fixture()
+        with self.assertRaises(TypeError):
+            # noinspection PyTypeChecker
+            ps.geometry.wing.Wing(
+                wing_cross_sections=[root_wcs, tip_wcs], mirror_only="invalid"
+            )
+
+        # Test invalid explode_into_strips
+        root_wcs = geometry_fixtures.make_root_wing_cross_section_fixture()
+        tip_wcs = geometry_fixtures.make_tip_wing_cross_section_fixture()
+        with self.assertRaises(TypeError):
+            # noinspection PyTypeChecker
+            ps.geometry.wing.Wing(
+                wing_cross_sections=[root_wcs, tip_wcs], explode_into_strips="invalid"
+            )
+
     def test_wing_name_validation(self):
         """Test Wing name parameter validation."""
         # Test valid string name
@@ -459,6 +524,32 @@ class TestWing(unittest.TestCase):
         # Test that Wing with root WingCrossSection having num_spanwise_panels=None fails
         with self.assertRaises(ValueError):
             geometry_fixtures.make_invalid_root_wing_fixture()
+
+    def test_symmetry_point_none_when_symmetric_raises_value_error(self):
+        """Test that symmetryPoint_G_Cg=None with symmetric=True raises ValueError."""
+        root_wcs = geometry_fixtures.make_root_wing_cross_section_fixture()
+        tip_wcs = geometry_fixtures.make_tip_wing_cross_section_fixture()
+        with self.assertRaises(ValueError):
+            ps.geometry.wing.Wing(
+                wing_cross_sections=[root_wcs, tip_wcs],
+                symmetric=True,
+                mirror_only=False,
+                symmetryNormal_G=[0.0, 1.0, 0.0],
+                symmetryPoint_G_Cg=None,
+            )
+
+    def test_symmetry_point_not_none_when_no_symmetry_raises_value_error(self):
+        """Test that symmetryPoint_G_Cg not None with no symmetry raises ValueError."""
+        root_wcs = geometry_fixtures.make_root_wing_cross_section_fixture()
+        tip_wcs = geometry_fixtures.make_tip_wing_cross_section_fixture()
+        with self.assertRaises(ValueError):
+            ps.geometry.wing.Wing(
+                wing_cross_sections=[root_wcs, tip_wcs],
+                symmetric=False,
+                mirror_only=False,
+                symmetryNormal_G=None,
+                symmetryPoint_G_Cg=[0.0, 0.0, 0.0],
+            )
 
     def test_span_simple_rectangular_wing(self):
         """Test span calculation for simple rectangular Wing."""
@@ -991,8 +1082,6 @@ class TestWingDeepCopy(unittest.TestCase):
 
     def test_deepcopy_creates_new_instance(self):
         """Test that deepcopy creates a new Wing instance."""
-        import copy
-
         original = self.type_1_wing
         copied = copy.deepcopy(original)
 
@@ -1001,8 +1090,6 @@ class TestWingDeepCopy(unittest.TestCase):
 
     def test_deepcopy_preserves_wing_parameters(self):
         """Test that deepcopy preserves Wing parameters."""
-        import copy
-
         original = self.type_1_wing
         copied = copy.deepcopy(original)
 
@@ -1018,8 +1105,6 @@ class TestWingDeepCopy(unittest.TestCase):
 
     def test_deepcopy_creates_independent_arrays(self):
         """Test that deepcopy creates independent copies of numpy arrays."""
-        import copy
-
         original = self.type_1_wing
         copied = copy.deepcopy(original)
 
@@ -1028,8 +1113,6 @@ class TestWingDeepCopy(unittest.TestCase):
 
     def test_deepcopy_creates_independent_wing_cross_sections(self):
         """Test that deepcopy creates independent WingCrossSection copies."""
-        import copy
-
         original = self.type_1_wing
         copied = copy.deepcopy(original)
 
@@ -1044,8 +1127,6 @@ class TestWingDeepCopy(unittest.TestCase):
 
     def test_deepcopy_preserves_symmetry_attributes(self):
         """Test that deepcopy preserves symmetry attributes correctly."""
-        import copy
-
         original = self.type_4_wing
         copied = copy.deepcopy(original)
 
@@ -1058,8 +1139,6 @@ class TestWingDeepCopy(unittest.TestCase):
 
     def test_deepcopy_preserves_none_symmetry_attributes(self):
         """Test that deepcopy handles None symmetry attributes correctly."""
-        import copy
-
         original = self.type_1_wing
         copied = copy.deepcopy(original)
 
@@ -1068,8 +1147,6 @@ class TestWingDeepCopy(unittest.TestCase):
 
     def test_deepcopy_unmeshed_wing(self):
         """Test that deepcopy handles unmeshed Wings correctly."""
-        import copy
-
         original = self.type_1_wing
         self.assertIsNone(original.panels)
 
@@ -1079,13 +1156,10 @@ class TestWingDeepCopy(unittest.TestCase):
         self.assertIsNone(copied.num_spanwise_panels)
         self.assertIsNone(copied.num_panels)
         self.assertIsNone(copied.panels)
-        self.assertIsNone(copied.wake_ring_vortices)
         self.assertIsNone(copied.gridWrvp_GP1_CgP1)
 
     def test_deepcopy_meshed_wing_preserves_mesh_metadata(self):
         """Test that deepcopy preserves mesh metadata for meshed Wings."""
-        import copy
-
         original = self.type_1_wing
         original.generate_mesh(1)
 
@@ -1097,8 +1171,6 @@ class TestWingDeepCopy(unittest.TestCase):
 
     def test_deepcopy_meshed_wing_preserves_panels(self):
         """Test that deepcopy preserves Panels for meshed Wings."""
-        import copy
-
         original = self.type_1_wing
         original.generate_mesh(1)
 
@@ -1115,21 +1187,14 @@ class TestWingDeepCopy(unittest.TestCase):
                 npt.assert_array_equal(copied_panel.Frpp_G_Cg, orig_panel.Frpp_G_Cg)
 
     def test_deepcopy_resets_wake_state(self):
-        """Test that deepcopy resets wake state to empty arrays."""
-        import copy
-
+        """Test that deepcopy resets wake state to an empty array."""
         original = self.type_1_wing
         original.generate_mesh(1)
 
         copied = copy.deepcopy(original)
 
-        self.assertIsNotNone(copied.wake_ring_vortices)
         self.assertIsNotNone(copied.gridWrvp_GP1_CgP1)
-        self.assertEqual(copied.wake_ring_vortices.shape[0], 0)
         self.assertEqual(copied.gridWrvp_GP1_CgP1.shape[0], 0)
-        self.assertEqual(
-            copied.wake_ring_vortices.shape[1], original.num_spanwise_panels
-        )
         self.assertEqual(
             copied.gridWrvp_GP1_CgP1.shape[1], original.num_spanwise_panels + 1
         )
@@ -1137,8 +1202,6 @@ class TestWingDeepCopy(unittest.TestCase):
     def test_deepcopy_independence_modifying_copy_mutable_attrs(self):
         """Test that modifying mutable attributes on the copy does not affect the
         original."""
-        import copy
-
         original = self.type_4_wing
         original.generate_mesh(4)
         original_symmetric = original.symmetric
@@ -1157,8 +1220,6 @@ class TestWingDeepCopy(unittest.TestCase):
     def test_deepcopy_independence_modifying_original_mutable_attrs(self):
         """Test that modifying mutable attributes on the original does not affect the
         copy."""
-        import copy
-
         original = self.type_4_wing
         original.generate_mesh(4)
 
@@ -1228,8 +1289,6 @@ class TestWingDeepCopy(unittest.TestCase):
 
     def test_deepcopy_preserves_geometric_properties(self):
         """Test that deepcopy preserves geometric property calculations."""
-        import copy
-
         original = self.type_1_wing
         original.generate_mesh(1)
 
@@ -1243,8 +1302,6 @@ class TestWingDeepCopy(unittest.TestCase):
 
     def test_deepcopy_type_4_wing(self):
         """Test that deepcopy works correctly for type 4 symmetric Wings."""
-        import copy
-
         original = self.type_4_wing
         original.generate_mesh(4)
 
@@ -1257,8 +1314,6 @@ class TestWingDeepCopy(unittest.TestCase):
 
     def test_deepcopy_copied_wing_is_functional(self):
         """Test that copied Wings are fully functional."""
-        import copy
-
         original = self.type_1_wing
         original.generate_mesh(1)
 
@@ -1276,14 +1331,48 @@ class TestWingDeepCopy(unittest.TestCase):
         self.assertGreater(span, 0.0)
         self.assertGreater(projected_area, 0.0)
 
+    def test_deepcopy_meshed_wing_with_populated_axis_caches(self):
+        """Test deepcopy of a meshed Wing whose WnX_G, WnY_G, and WnZ_G caches
+        have been populated by accessing those properties.
+
+        Accessing the axis-vector properties forces the lazy-computed arrays to
+        be cached as non-None, which exercises the not-None copy branches inside
+        __deepcopy__ that are skipped when only calling generate_mesh.
+        """
+        original = self.type_1_wing
+        original.generate_mesh(1)
+
+        # Access cached properties to populate internal caches before deepcopy.
+        _wn_x = original.WnX_G
+        _wn_y = original.WnY_G
+        _wn_z = original.WnZ_G
+        _children_to_wcs = original.children_T_pas_Wn_Ler_to_Wcs_Lp
+        _children_from_wcs = original.children_T_pas_Wcs_Lp_to_Wn_Ler
+
+        copied = copy.deepcopy(original)
+
+        # Verify the copied wing has matching axis vectors.
+        npt.assert_array_equal(copied.WnX_G, original.WnX_G)
+        npt.assert_array_equal(copied.WnY_G, original.WnY_G)
+        npt.assert_array_equal(copied.WnZ_G, original.WnZ_G)
+
+        # Verify the children transformation matrices are copied correctly.
+        for i in range(len(original.wing_cross_sections)):
+            npt.assert_array_equal(
+                copied.children_T_pas_Wn_Ler_to_Wcs_Lp[i],
+                original.children_T_pas_Wn_Ler_to_Wcs_Lp[i],
+            )
+            npt.assert_array_equal(
+                copied.children_T_pas_Wcs_Lp_to_Wn_Ler[i],
+                original.children_T_pas_Wcs_Lp_to_Wn_Ler[i],
+            )
+
 
 class TestWingGetPlottableData(unittest.TestCase):
     """Tests for Wing.get_plottable_data method."""
 
     def setUp(self):
         """Set up test fixtures for get_plottable_data tests."""
-        self.type_1_wing = geometry_fixtures.make_type_1_wing_fixture()
-        self.type_4_wing = geometry_fixtures.make_type_4_wing_fixture()
 
     def test_get_plottable_data_returns_none_when_symmetry_type_not_set(self):
         """Test that get_plottable_data returns None when symmetry_type not set."""
@@ -1550,5 +1639,563 @@ class TestWingTransformationMatrixCaching(unittest.TestCase):
                 T[0, 0] = 999.0
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestExplodeIntoStripsMethods(unittest.TestCase):
+    """This class contains unit tests for Wing._explode_wing,
+    Wing._interpolate_between_wing_cross_sections, and the explode_into_strips
+    parameter."""
+
+    @staticmethod
+    def _make_wcs_3span():
+        """Create a root WCS with num_spanwise_panels=3."""
+        return ps.geometry.wing_cross_section.WingCrossSection(
+            airfoil=ps.geometry.airfoil.Airfoil(name="naca2412"),
+            num_spanwise_panels=3,
+            chord=1.0,
+            Lp_Wcsp_Lpp=(0.0, 0.0, 0.0),
+            angles_Wcsp_to_Wcs_ixyz=(0.0, 0.0, 0.0),
+            spanwise_spacing="uniform",
+        )
+
+    @staticmethod
+    def _make_tip_wcs():
+        """Create a tip WCS with num_spanwise_panels=None."""
+        return ps.geometry.wing_cross_section.WingCrossSection(
+            airfoil=ps.geometry.airfoil.Airfoil(name="naca2412"),
+            num_spanwise_panels=None,
+            chord=0.5,
+            Lp_Wcsp_Lpp=(0.0, 0.5, 0.0),
+            angles_Wcsp_to_Wcs_ixyz=(0.0, 0.0, 0.0),
+            spanwise_spacing=None,
+        )
+
+    def _make_plain_wing(self, explode_into_strips=False):
+        """Create a minimal 2-WCS wing."""
+        return ps.geometry.wing.Wing(
+            wing_cross_sections=[self._make_wcs_3span(), self._make_tip_wcs()],
+            name="Test Wing",
+            Ler_Gs_Cgs=(0.0, 0.0, 0.0),
+            angles_Gs_to_Wn_ixyz=(0.0, 0.0, 0.0),
+            symmetric=False,
+            mirror_only=False,
+            explode_into_strips=explode_into_strips,
+            num_chordwise_panels=2,
+            chordwise_spacing="uniform",
+        )
+
+    def test_explode_into_strips_false_wcs_count_unchanged(self):
+        """Test that explode_into_strips=False keeps the original two WCS."""
+        wing = self._make_plain_wing(explode_into_strips=False)
+        self.assertEqual(len(wing.wing_cross_sections), 2)
+
+    def test_explode_into_strips_true_correct_wcs_count(self):
+        """Test that explode_into_strips=True with root num_spanwise=3 produces 4 WCS
+        (root copy plus 3 interpolated including the tip)."""
+        wing = self._make_plain_wing(explode_into_strips=True)
+        self.assertEqual(len(wing.wing_cross_sections), 4)
+
+    def test_explode_into_strips_true_non_tip_have_num_spanwise_one(self):
+        """Test that all non-tip WCS have num_spanwise_panels=1 after explode."""
+        wing = self._make_plain_wing(explode_into_strips=True)
+        for wcs in wing.wing_cross_sections[:-1]:
+            with self.subTest(wcs=wcs):
+                self.assertEqual(wcs.num_spanwise_panels, 1)
+
+    def test_explode_into_strips_true_tip_has_none_spanwise(self):
+        """Test that the last WCS (tip) has num_spanwise_panels=None after explode."""
+        wing = self._make_plain_wing(explode_into_strips=True)
+        self.assertIsNone(wing.wing_cross_sections[-1].num_spanwise_panels)
+
+    def test_interpolate_returns_n_sections(self):
+        """Test that _interpolate_between_wing_cross_sections returns N WCS (the
+        sections downstream of wcs1, with no root copy), where N is wcs1's spanwise
+        panel count."""
+        wing = self._make_plain_wing(explode_into_strips=False)
+        result = wing._interpolate_between_wing_cross_sections(
+            self._make_wcs_3span(), self._make_tip_wcs()
+        )
+        # N=3 => 3 interpolated sections
+        self.assertEqual(len(result), 3)
+
+    def test_interpolate_last_section_has_tip_chord(self):
+        """Test that the last WCS in the result has the tip chord."""
+        wing = self._make_plain_wing(explode_into_strips=False)
+        result = wing._interpolate_between_wing_cross_sections(
+            self._make_wcs_3span(), self._make_tip_wcs()
+        )
+        self.assertAlmostEqual(result[-1].chord, 0.5)
+
+    def test_interpolate_first_section_chord_linearly_interpolated(self):
+        """Test that the first interpolated WCS chord is linearly interpolated
+        between root (1.0) and tip (0.5)."""
+        wing = self._make_plain_wing(explode_into_strips=False)
+        result = wing._interpolate_between_wing_cross_sections(
+            self._make_wcs_3span(), self._make_tip_wcs()
+        )
+        # N=3: the first section is at t=1/3
+        # chord at t=1/3: (1 - 1/3)*1.0 + (1/3)*0.5 = 5/6
+        expected_first_interp = (1.0 - 1.0 / 3.0) * 1.0 + (1.0 / 3.0) * 0.5
+        self.assertAlmostEqual(result[0].chord, expected_first_interp, places=10)
+
+    def test_interpolate_lp_y_divided_by_n(self):
+        """Test that the Lp_Wcsp_Lpp y-component of each interpolated WCS is
+        tip_Lp_y / N."""
+        wing = self._make_plain_wing(explode_into_strips=False)
+        result = wing._interpolate_between_wing_cross_sections(
+            self._make_wcs_3span(), self._make_tip_wcs()
+        )
+        # tip has Lp_y = 0.5; N=3 => each section Lp_y = 0.5/3
+        expected_lp_y = 0.5 / 3.0
+        for wcs in result:
+            with self.subTest(wcs=wcs):
+                self.assertAlmostEqual(
+                    float(wcs.Lp_Wcsp_Lpp[1]), expected_lp_y, places=10
+                )
+
+    def test_explode_wing_with_two_wcs_returns_correct_count(self):
+        """Test that _explode_wing with a 2-WCS input (root: num=3, tip) returns 4
+        WCS."""
+        wing = self._make_plain_wing(explode_into_strips=False)
+        result = wing._explode_wing([self._make_wcs_3span(), self._make_tip_wcs()])
+        self.assertEqual(len(result), 4)
+
+    def test_explode_wing_first_wcs_is_root(self):
+        """Test that _explode_wing seeds the result with the root WCS (root chord, a
+        single spanwise panel)."""
+        wing = self._make_plain_wing(explode_into_strips=False)
+        result = wing._explode_wing([self._make_wcs_3span(), self._make_tip_wcs()])
+        self.assertAlmostEqual(result[0].chord, 1.0)
+        self.assertEqual(result[0].num_spanwise_panels, 1)
+
+    def test_explode_wing_all_non_tip_have_num_spanwise_one(self):
+        """Test that _explode_wing produces WCS where every non-tip entry has
+        num_spanwise_panels=1."""
+        wing = self._make_plain_wing(explode_into_strips=False)
+        result = wing._explode_wing([self._make_wcs_3span(), self._make_tip_wcs()])
+        for wcs in result[:-1]:
+            with self.subTest(wcs=wcs):
+                self.assertEqual(wcs.num_spanwise_panels, 1)
+
+    def test_explode_wing_last_wcs_is_tip(self):
+        """Test that _explode_wing produces a final WCS with num_spanwise_panels=None."""
+        wing = self._make_plain_wing(explode_into_strips=False)
+        result = wing._explode_wing([self._make_wcs_3span(), self._make_tip_wcs()])
+        self.assertIsNone(result[-1].num_spanwise_panels)
+
+    def test_explode_wing_rejects_non_uniform_spanwise_spacing(self):
+        """Test that _explode_wing raises ValueError when a non tip WCS uses cosine
+        spanwise spacing, since the explosion assumes uniformly distributed
+        intermediates."""
+        wing = self._make_plain_wing(explode_into_strips=False)
+        cosine_root = ps.geometry.wing_cross_section.WingCrossSection(
+            airfoil=ps.geometry.airfoil.Airfoil(name="naca2412"),
+            num_spanwise_panels=3,
+            chord=1.0,
+            Lp_Wcsp_Lpp=(0.0, 0.0, 0.0),
+            angles_Wcsp_to_Wcs_ixyz=(0.0, 0.0, 0.0),
+            spanwise_spacing="cosine",
+        )
+        with self.assertRaises(ValueError):
+            wing._explode_wing([cosine_root, self._make_tip_wcs()])
+
+    def test_spanwise_mesh_default_is_trapezoidal(self):
+        """Test that a Wing built without explode_into_strips has a trapezoidal spanwise
+        mesh marker."""
+        wing = self._make_plain_wing(explode_into_strips=False)
+        self.assertEqual(wing.spanwise_mesh, "trapezoidal")
+
+    def test_spanwise_mesh_exploded_is_exploded(self):
+        """Test that a Wing built with explode_into_strips has an exploded spanwise mesh
+        marker."""
+        wing = self._make_plain_wing(explode_into_strips=True)
+        self.assertEqual(wing.spanwise_mesh, "exploded")
+
+    def test_spanwise_mesh_is_read_only(self):
+        """Test that the spanwise_mesh marker cannot be reassigned."""
+        wing = self._make_plain_wing(explode_into_strips=False)
+        with self.assertRaises(AttributeError):
+            # noinspection PyPropertyAccess
+            wing.spanwise_mesh = "exploded"
+
+    def test_spanwise_mesh_preserved_by_deepcopy(self):
+        """Test that deep copying a Wing preserves its spanwise mesh marker."""
+        wing = self._make_plain_wing(explode_into_strips=True)
+        wing_copy = copy.deepcopy(wing)
+        self.assertEqual(wing_copy.spanwise_mesh, "exploded")
+
+
+class TestFromEdgePoints(unittest.TestCase):
+    """This class contains unit tests for the Wing.from_edge_points constructor."""
+
+    @staticmethod
+    def _straight_edge_points(num_input_points=11):
+        """Build densely sampled straight leading and trailing edge curves.
+
+        The leading edge is a straight backward sweep from the origin to (0.5, 1.0,
+        0.0), so x = 0.5 * y. The trailing edge is a straight, unswept line at x =
+        1.0. The chord is therefore 1.0 - 0.5 * y, tapering from a unit root chord to
+        a 0.5 tip chord. PCHIP reproduces these linear curves exactly, so the
+        resampled WingCrossSections take predictable values.
+        """
+        ys = np.linspace(0.0, 1.0, num_input_points)
+        zeros = np.zeros_like(ys)
+        leading = np.column_stack((0.5 * ys, ys, zeros))
+        trailing = np.column_stack((np.ones_like(ys), ys, zeros))
+        return leading, trailing
+
+    @staticmethod
+    def _pointed_tip_edge_points(num_input_points=11):
+        """Build straight edge curves for a planform that tapers to a point at the tip.
+
+        The leading edge runs from the origin to (1.0, 1.0, 0.0) and the trailing
+        edge is unswept at x = 1.0, so the chord is 1.0 - y and falls to zero exactly
+        at the tip. Such a planform is invalid without a tip trim.
+        """
+        ys = np.linspace(0.0, 1.0, num_input_points)
+        zeros = np.zeros_like(ys)
+        leading = np.column_stack((ys, ys, zeros))
+        trailing = np.column_stack((np.ones_like(ys), ys, zeros))
+        return leading, trailing
+
+    def _make_edge_wing(self, num_wing_cross_sections=5, tip_trim_fraction=0.0):
+        """Build a from_edge_points Wing from the straight tapered edge curves."""
+        leading, trailing = self._straight_edge_points()
+        return ps.geometry.wing.Wing.from_edge_points(
+            leadingEdgePoints_Wn_Ler=leading,
+            trailingEdgePoints_Wn_Ler=trailing,
+            num_wing_cross_sections=num_wing_cross_sections,
+            airfoil=ps.geometry.airfoil.Airfoil(name="naca0012"),
+            name="Edge Wing",
+            num_chordwise_panels=2,
+            chordwise_spacing="uniform",
+            tip_trim_fraction=tip_trim_fraction,
+        )
+
+    def test_returns_wing(self):
+        """Test that from_edge_points returns a Wing instance."""
+        wing = self._make_edge_wing()
+        self.assertIsInstance(wing, ps.geometry.wing.Wing)
+
+    def test_wing_cross_section_count(self):
+        """Test that from_edge_points produces num_wing_cross_sections WingCrossSections."""
+        wing = self._make_edge_wing(num_wing_cross_sections=5)
+        self.assertEqual(len(wing.wing_cross_sections), 5)
+
+    def test_spanwise_mesh_is_edge_defined(self):
+        """Test that a from_edge_points Wing reports an edge_defined spanwise mesh."""
+        wing = self._make_edge_wing()
+        self.assertEqual(wing.spanwise_mesh, "edge_defined")
+
+    def test_non_tip_wing_cross_sections_have_num_spanwise_one(self):
+        """Test that every non tip WingCrossSection has num_spanwise_panels of one."""
+        wing = self._make_edge_wing()
+        for wing_cross_section in wing.wing_cross_sections[:-1]:
+            with self.subTest(wing_cross_section=wing_cross_section):
+                self.assertEqual(wing_cross_section.num_spanwise_panels, 1)
+
+    def test_tip_wing_cross_section_has_none_spanwise(self):
+        """Test that the tip WingCrossSection has num_spanwise_panels of None."""
+        wing = self._make_edge_wing()
+        self.assertIsNone(wing.wing_cross_sections[-1].num_spanwise_panels)
+
+    def test_chords_match_linear_taper(self):
+        """Test that the resampled chords follow the expected linear taper."""
+        wing = self._make_edge_wing(num_wing_cross_sections=5)
+        ys = np.linspace(0.0, 1.0, 5)
+        expected_chords = 1.0 - 0.5 * ys
+        for wing_cross_section, expected_chord in zip(
+            wing.wing_cross_sections, expected_chords
+        ):
+            with self.subTest(expected_chord=expected_chord):
+                self.assertAlmostEqual(
+                    wing_cross_section.chord, float(expected_chord), places=10
+                )
+
+    def test_root_offset_is_zero(self):
+        """Test that the root WingCrossSection has a zero leading point offset."""
+        wing = self._make_edge_wing()
+        npt.assert_array_equal(
+            wing.wing_cross_sections[0].Lp_Wcsp_Lpp, np.array([0.0, 0.0, 0.0])
+        )
+
+    def test_leading_point_offsets_match_expected(self):
+        """Test that each non root leading point offset is the spanwise step of the
+        straight swept leading edge."""
+        wing = self._make_edge_wing(num_wing_cross_sections=5)
+        for wing_cross_section in wing.wing_cross_sections[1:]:
+            with self.subTest(wing_cross_section=wing_cross_section):
+                npt.assert_array_almost_equal(
+                    wing_cross_section.Lp_Wcsp_Lpp,
+                    np.array([0.125, 0.25, 0.0]),
+                    decimal=10,
+                )
+
+    def test_all_angle_vectors_are_zero(self):
+        """Test that every WingCrossSection keeps a zero angle vector (untwisted)."""
+        wing = self._make_edge_wing()
+        for wing_cross_section in wing.wing_cross_sections:
+            with self.subTest(wing_cross_section=wing_cross_section):
+                npt.assert_array_equal(
+                    wing_cross_section.angles_Wcsp_to_Wcs_ixyz,
+                    np.array([0.0, 0.0, 0.0]),
+                )
+
+    def test_stored_leading_edge_points_match_input(self):
+        """Test that the stored leading edge curve matches the supplied points."""
+        leading, _ = self._straight_edge_points()
+        wing = self._make_edge_wing()
+        npt.assert_array_equal(wing.leadingEdgePoints_Wn_Ler, leading)
+
+    def test_stored_trailing_edge_points_match_input(self):
+        """Test that the stored trailing edge curve matches the supplied points."""
+        _, trailing = self._straight_edge_points()
+        wing = self._make_edge_wing()
+        npt.assert_array_equal(wing.trailingEdgePoints_Wn_Ler, trailing)
+
+    def test_stored_curves_are_read_only(self):
+        """Test that the stored edge curves cannot be mutated in place."""
+        wing = self._make_edge_wing()
+        self.assertFalse(wing.leadingEdgePoints_Wn_Ler.flags.writeable)
+        self.assertFalse(wing.trailingEdgePoints_Wn_Ler.flags.writeable)
+        with self.assertRaises(ValueError):
+            wing.leadingEdgePoints_Wn_Ler[0, 0] = 1.0
+        with self.assertRaises(ValueError):
+            wing.trailingEdgePoints_Wn_Ler[0, 0] = 1.0
+
+    def test_edge_properties_are_read_only(self):
+        """Test that the edge curve and tip trim properties cannot be reassigned."""
+        wing = self._make_edge_wing()
+        with self.assertRaises(AttributeError):
+            # noinspection PyPropertyAccess
+            wing.leadingEdgePoints_Wn_Ler = None
+        with self.assertRaises(AttributeError):
+            # noinspection PyPropertyAccess
+            wing.trailingEdgePoints_Wn_Ler = None
+        with self.assertRaises(AttributeError):
+            # noinspection PyPropertyAccess
+            wing.tip_trim_fraction = 0.5
+
+    def test_tip_trim_fraction_defaults_to_zero(self):
+        """Test that the stored tip trim fraction defaults to zero."""
+        wing = self._make_edge_wing()
+        self.assertEqual(wing.tip_trim_fraction, 0.0)
+
+    def test_tip_trim_fraction_stored(self):
+        """Test that a non zero tip trim fraction is stored on the Wing."""
+        wing = self._make_edge_wing(tip_trim_fraction=0.25)
+        self.assertEqual(wing.tip_trim_fraction, 0.25)
+
+    def test_edge_attributes_none_for_normal_wing(self):
+        """Test that a Wing not built from edge points reports None edge attributes."""
+        wing = geometry_fixtures.make_type_1_wing_fixture()
+        self.assertIsNone(wing.leadingEdgePoints_Wn_Ler)
+        self.assertIsNone(wing.trailingEdgePoints_Wn_Ler)
+        self.assertIsNone(wing.tip_trim_fraction)
+
+    def test_non_symmetric_wing_cross_sections_have_no_control_surface_type(self):
+        """Test that a non symmetric from_edge_points Wing leaves every control surface
+        symmetry type None, as symmetry types 1 through 3 require."""
+        wing = self._make_edge_wing()
+        for wing_cross_section in wing.wing_cross_sections:
+            with self.subTest(wing_cross_section=wing_cross_section):
+                self.assertIsNone(wing_cross_section.control_surface_symmetry_type)
+
+    def test_symmetric_wing_cross_sections_have_symmetric_control_surface_type(self):
+        """Test that a symmetric from_edge_points Wing marks every control surface
+        symmetry type symmetric, as symmetry types 4 and 5 require."""
+        leading, trailing = self._straight_edge_points()
+        wing = ps.geometry.wing.Wing.from_edge_points(
+            leadingEdgePoints_Wn_Ler=leading,
+            trailingEdgePoints_Wn_Ler=trailing,
+            num_wing_cross_sections=5,
+            airfoil=ps.geometry.airfoil.Airfoil(name="naca0012"),
+            symmetric=True,
+            symmetryNormal_G=(0.0, 1.0, 0.0),
+            symmetryPoint_G_Cg=(0.0, 0.0, 0.0),
+        )
+        for wing_cross_section in wing.wing_cross_sections:
+            with self.subTest(wing_cross_section=wing_cross_section):
+                self.assertEqual(
+                    wing_cross_section.control_surface_symmetry_type, "symmetric"
+                )
+
+    def test_symmetric_wing_meshes_through_airplane(self):
+        """Test that a symmetric from_edge_points Wing meshes through an Airplane, the
+        path that requires a non None control surface symmetry type on every
+        WingCrossSection."""
+        leading, trailing = self._straight_edge_points()
+        wing = ps.geometry.wing.Wing.from_edge_points(
+            leadingEdgePoints_Wn_Ler=leading,
+            trailingEdgePoints_Wn_Ler=trailing,
+            num_wing_cross_sections=5,
+            airfoil=ps.geometry.airfoil.Airfoil(name="naca0012"),
+            symmetric=True,
+            symmetryNormal_G=(0.0, 1.0, 0.0),
+            symmetryPoint_G_Cg=(0.0, 0.0, 0.0),
+            num_chordwise_panels=2,
+            chordwise_spacing="uniform",
+        )
+        airplane = ps.geometry.airplane.Airplane(wings=[wing], name="Edge Airplane")
+        meshed_wing = airplane.wings[0]
+        self.assertEqual(meshed_wing.symmetry_type, 4)
+        self.assertIsNotNone(meshed_wing.panels)
+
+    def test_tip_trim_moves_outermost_section_inboard(self):
+        """Test that a tip trim resamples over a shortened span, leaving the outermost
+        WingCrossSection with a finite chord inboard of the geometric tip."""
+        wing = self._make_edge_wing(num_wing_cross_sections=5, tip_trim_fraction=0.2)
+        # The trimmed tip sits at y = 0.8, where the chord is 1.0 - 0.5 * 0.8 = 0.6.
+        self.assertAlmostEqual(wing.wing_cross_sections[-1].chord, 0.6, places=10)
+
+    def test_pointed_tip_rejected_without_trim(self):
+        """Test that a planform tapering to a point at the tip is rejected without a
+        tip trim, since the tip chord would be zero."""
+        leading, trailing = self._pointed_tip_edge_points()
+        with self.assertRaises(ValueError):
+            ps.geometry.wing.Wing.from_edge_points(
+                leadingEdgePoints_Wn_Ler=leading,
+                trailingEdgePoints_Wn_Ler=trailing,
+                num_wing_cross_sections=5,
+                airfoil=ps.geometry.airfoil.Airfoil(name="naca0012"),
+            )
+
+    def test_pointed_tip_accepted_with_trim(self):
+        """Test that a tip trim lets a planform tapering to a point at the tip build
+        with a finite tip chord."""
+        leading, trailing = self._pointed_tip_edge_points()
+        wing = ps.geometry.wing.Wing.from_edge_points(
+            leadingEdgePoints_Wn_Ler=leading,
+            trailingEdgePoints_Wn_Ler=trailing,
+            num_wing_cross_sections=5,
+            airfoil=ps.geometry.airfoil.Airfoil(name="naca0012"),
+            tip_trim_fraction=0.2,
+        )
+        # The trimmed tip sits at y = 0.8, where the chord is 1.0 - 0.8 = 0.2.
+        self.assertAlmostEqual(wing.wing_cross_sections[-1].chord, 0.2, places=10)
+
+    def test_deepcopy_preserves_edge_attributes(self):
+        """Test that deep copying a from_edge_points Wing preserves and isolates its
+        edge attributes."""
+        wing = self._make_edge_wing(tip_trim_fraction=0.1)
+        wing_copy = copy.deepcopy(wing)
+        self.assertEqual(wing_copy.spanwise_mesh, "edge_defined")
+        self.assertEqual(wing_copy.tip_trim_fraction, 0.1)
+        npt.assert_array_equal(
+            wing_copy.leadingEdgePoints_Wn_Ler, wing.leadingEdgePoints_Wn_Ler
+        )
+        npt.assert_array_equal(
+            wing_copy.trailingEdgePoints_Wn_Ler, wing.trailingEdgePoints_Wn_Ler
+        )
+        # The copied curves are independent and remain read only.
+        self.assertIsNot(
+            wing_copy.leadingEdgePoints_Wn_Ler, wing.leadingEdgePoints_Wn_Ler
+        )
+        self.assertFalse(wing_copy.leadingEdgePoints_Wn_Ler.flags.writeable)
+        self.assertFalse(wing_copy.trailingEdgePoints_Wn_Ler.flags.writeable)
+
+    def test_rejects_non_increasing_leading_edge_y(self):
+        """Test that a leading edge with non increasing y components is rejected."""
+        leading, trailing = self._straight_edge_points()
+        leading[2, 1] = leading[1, 1]
+        with self.assertRaises(ValueError):
+            ps.geometry.wing.Wing.from_edge_points(
+                leadingEdgePoints_Wn_Ler=leading,
+                trailingEdgePoints_Wn_Ler=trailing,
+                num_wing_cross_sections=5,
+                airfoil=ps.geometry.airfoil.Airfoil(name="naca0012"),
+            )
+
+    def test_rejects_non_planar_points(self):
+        """Test that a non zero z component anywhere is rejected."""
+        leading, trailing = self._straight_edge_points()
+        leading[3, 2] = 0.1
+        with self.assertRaises(ValueError):
+            ps.geometry.wing.Wing.from_edge_points(
+                leadingEdgePoints_Wn_Ler=leading,
+                trailingEdgePoints_Wn_Ler=trailing,
+                num_wing_cross_sections=5,
+                airfoil=ps.geometry.airfoil.Airfoil(name="naca0012"),
+            )
+
+    def test_rejects_leading_edge_not_anchored_at_origin(self):
+        """Test that a leading edge whose first point is not the origin is rejected."""
+        leading, trailing = self._straight_edge_points()
+        leading[0, 0] = 0.1
+        with self.assertRaises(ValueError):
+            ps.geometry.wing.Wing.from_edge_points(
+                leadingEdgePoints_Wn_Ler=leading,
+                trailingEdgePoints_Wn_Ler=trailing,
+                num_wing_cross_sections=5,
+                airfoil=ps.geometry.airfoil.Airfoil(name="naca0012"),
+            )
+
+    def test_rejects_trailing_edge_root_without_root_chord(self):
+        """Test that a trailing edge whose first point lacks a positive root chord is
+        rejected."""
+        leading, trailing = self._straight_edge_points()
+        trailing[0, 0] = 0.0
+        with self.assertRaises(ValueError):
+            ps.geometry.wing.Wing.from_edge_points(
+                leadingEdgePoints_Wn_Ler=leading,
+                trailingEdgePoints_Wn_Ler=trailing,
+                num_wing_cross_sections=5,
+                airfoil=ps.geometry.airfoil.Airfoil(name="naca0012"),
+            )
+
+    def test_rejects_mismatched_tip_y(self):
+        """Test that curves spanning different maximum y values are rejected."""
+        leading, trailing = self._straight_edge_points()
+        trailing[-1, 1] = 0.9
+        with self.assertRaises(ValueError):
+            ps.geometry.wing.Wing.from_edge_points(
+                leadingEdgePoints_Wn_Ler=leading,
+                trailingEdgePoints_Wn_Ler=trailing,
+                num_wing_cross_sections=5,
+                airfoil=ps.geometry.airfoil.Airfoil(name="naca0012"),
+            )
+
+    def test_rejects_too_few_points(self):
+        """Test that a curve with fewer than two points is rejected."""
+        _, trailing = self._straight_edge_points()
+        with self.assertRaises(ValueError):
+            ps.geometry.wing.Wing.from_edge_points(
+                leadingEdgePoints_Wn_Ler=np.array([[0.0, 0.0, 0.0]]),
+                trailingEdgePoints_Wn_Ler=trailing,
+                num_wing_cross_sections=5,
+                airfoil=ps.geometry.airfoil.Airfoil(name="naca0012"),
+            )
+
+    def test_rejects_too_few_wing_cross_sections(self):
+        """Test that fewer than two WingCrossSections is rejected."""
+        leading, trailing = self._straight_edge_points()
+        with self.assertRaises(ValueError):
+            ps.geometry.wing.Wing.from_edge_points(
+                leadingEdgePoints_Wn_Ler=leading,
+                trailingEdgePoints_Wn_Ler=trailing,
+                num_wing_cross_sections=1,
+                airfoil=ps.geometry.airfoil.Airfoil(name="naca0012"),
+            )
+
+    def test_rejects_non_airfoil(self):
+        """Test that an airfoil argument that is not an Airfoil is rejected."""
+        leading, trailing = self._straight_edge_points()
+        with self.assertRaises(TypeError):
+            ps.geometry.wing.Wing.from_edge_points(
+                leadingEdgePoints_Wn_Ler=leading,
+                trailingEdgePoints_Wn_Ler=trailing,
+                num_wing_cross_sections=5,
+                airfoil="naca0012",
+            )
+
+    def test_rejects_tip_trim_fraction_out_of_range(self):
+        """Test that a tip trim fraction outside [0, 1) is rejected."""
+        leading, trailing = self._straight_edge_points()
+        for bad_fraction in (-0.1, 1.0, 1.5):
+            with self.subTest(tip_trim_fraction=bad_fraction):
+                with self.assertRaises(ValueError):
+                    ps.geometry.wing.Wing.from_edge_points(
+                        leadingEdgePoints_Wn_Ler=leading,
+                        trailingEdgePoints_Wn_Ler=trailing,
+                        num_wing_cross_sections=5,
+                        airfoil=ps.geometry.airfoil.Airfoil(name="naca0012"),
+                        tip_trim_fraction=bad_fraction,
+                    )

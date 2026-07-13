@@ -8,12 +8,16 @@ None
 
 draw: Draws a solver's Airplane(s).
 
-animate: Animates an UnsteadyRingVortexLatticeMethodSolver's Airplane(s).
+animate: Animates the Airplane(s) of an UnsteadyRingVortexLatticeMethodSolver or one of
+its subclasses (the aeroelastic or free flight solver).
 
-plot_results_versus_time: Plots an UnsteadyRingVortexLatticeMethodSolver's loads and
-load coefficients as a function of time.
+plot_results_versus_time: Plots the loads and load coefficients of an
+UnsteadyRingVortexLatticeMethodSolver or one of its subclasses (the aeroelastic or free
+flight solver) as a function of time. For a free flight solver, it also plots the first
+Airplane's six-degree-of-freedom state history.
 
-log_results: Logs a solver's load and load coefficients.
+log_results: Logs a solver's load and load coefficients, and, for a free flight solver,
+the first Airplane's initial and final six-degree-of-freedom state.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import math
 import time
 
 import matplotlib.colors
+import matplotlib.legend_handler
 import matplotlib.pyplot as plt
 import numpy as np
 import pyvista as pv
@@ -31,6 +36,7 @@ from . import (
     _logging,
     _parameter_validation,
     _transformations,
+    free_flight_unsteady_ring_vortex_lattice_method,
     geometry,
 )
 from . import operating_point as operating_point_mod
@@ -39,6 +45,7 @@ from . import (
     steady_ring_vortex_lattice_method,
     unsteady_ring_vortex_lattice_method,
 )
+from .movements import free_flight_movement as free_flight_movement_mod
 
 _logger = _logging.get_logger("output")
 
@@ -48,7 +55,7 @@ _diverging_color_map = "delta"
 _wake_vortex_color = "white"
 _panel_color = "chartreuse"
 _streamline_color = "orchid"
-_image_surface_opacity = 0.75
+_image_surface_opacity = 0.5
 _image_surface_scale = 5.0
 _image_reflection_mute_factor = 0.5
 _image_surface_checker_size = 25
@@ -56,7 +63,13 @@ _image_surface_color_a = np.array([40, 40, 40], dtype=np.uint8)
 _image_surface_color_b = np.array([80, 80, 80], dtype=np.uint8)
 _plotter_background_color = "black"
 _figure_background_color = "None"
-_text_color = "#818181"
+_text_color = (129, 129, 129)
+_text_color_normalized: tuple[float, float, float] = (
+    _text_color[0] / 255,
+    _text_color[1] / 255,
+    _text_color[2] / 255,
+)
+_text_color_surface = (220, 220, 220)
 _quality = 75.0
 _window_size = [1024, 768]
 
@@ -77,13 +90,15 @@ _prism = [
     "#666666",
 ]
 [
-    _drag_color,
-    _side_color,
-    _lift_color,
-    _roll_color,
-    _pitch_color,
-    _yaw_color,
-] = _prism[3:9]
+    _alpha_color,
+    _beta_color,
+    _linear_x_color,
+    _linear_y_color,
+    _linear_z_color,
+    _angular_x_color,
+    _angular_y_color,
+    _angular_z_color,
+] = _prism[1:9]
 
 # Set constants for the color maps, scalar bars, and text boxes.
 _color_map_num_sig = 3
@@ -98,12 +113,26 @@ _text_min_position = (0.85, 0.050)
 _text_speed_position = (0.05, 0.075)
 _text_font_size = 11
 
-# Set the number of markers and the marker size for the results plots.
-_num_markers = 6
-_marker_size = 8
+# Set the line widths for the results plots. Lines are drawn from thickest to
+# thinnest so that all remain visible even when they overlap.
+_max_line_width = 3.5
+_min_line_width = 1.5
+_legend_line_width = (_max_line_width + _min_line_width) / 2
 
-# Calculate the normalized spacing between the markers for the results plots.
-_marker_spacing = 1.0 / _num_markers
+# Define the camera's view-up direction for free flight visualizations. Earth axes have
+# +z pointing down, so physical up is the -z direction. The free flight visualizations
+# render geometry in Earth axes (so the body flies through the scene in its true pose)
+# and use this view-up so that down appears downward on screen. This is a rendering
+# setting, not an axis system.
+_free_flight_view_up_E = np.array([0.0, 0.0, -1.0], dtype=float)
+
+# Define the camera's view direction for free flight visualizations, given as the offset
+# from the focal point to the camera position (in Earth axes). This views the scene
+# obliquely from the South, West, and above (Earth -x, -y, and -z).
+_free_flight_view_direction_E = np.array([1.0, -1.0, -1.0], dtype=float)
+_free_flight_view_direction_E = _free_flight_view_direction_E / np.linalg.norm(
+    _free_flight_view_direction_E
+)
 
 
 def draw(
@@ -120,6 +149,11 @@ def draw(
 ) -> None:
     """Draws a solver's Airplane(s).
 
+    For a FreeFlightUnsteadyRingVortexLatticeMethodSolver, the final time step's
+    geometry is rendered in Earth axes at its true position and orientation, so the
+    body's flight attitude is visible, rather than being drawn body-fixed in geometry
+    axes.
+
     **Citation:**
 
     Adapted from: vlm3.draw in AeroSandbox
@@ -128,7 +162,12 @@ def draw(
 
     Date of retrieval: 03/28/2020
 
-    :param solver: The solver whose Airplane(s) will be plotted.
+    :param solver: The solver whose Airplane(s) will be plotted. This can be a
+        SteadyHorseshoeVortexLatticeMethodSolver, a SteadyRingVortexLatticeMethodSolver,
+        or an UnsteadyRingVortexLatticeMethodSolver. The
+        UnsteadyRingVortexLatticeMethodSolver's subclasses, the
+        AeroelasticUnsteadyRingVortexLatticeMethodSolver and the
+        FreeFlightUnsteadyRingVortexLatticeMethodSolver, are also accepted.
     :param scalar_type: Determines how to color the Panels. Setting this to None colors
         the Panels uniformly. If the solver has been run, it can also be "induced drag",
         "side force", or "lift", which respectively use each Panel's induced drag, side
@@ -137,7 +176,7 @@ def draw(
         back of the Wings. If True, the solver's streamlines must have already been
         calculated. Can be a bool or a numpy bool and will be converted internally to a
         bool. The default is False.
-    :param show_wake_vortices: Set this to True to show any wake RingVortices. If True,
+    :param show_wake_vortices: Set this to True to show any wake ring vortices. If True,
         the solver must be an UnsteadyRingVortexLatticeMethodSolver and must have
         already been run. Can be a bool or a numpy bool and will be converted internally
         to a bool. The default is False.
@@ -210,6 +249,17 @@ def draw(
     plotter = pv.Plotter(window_size=_window_size, lighting=None)
     plotter.enable_parallel_projection()  # type: ignore[call-arg]
 
+    # For a free flight solver, geometry is rendered in its true Earth-frame pose so the
+    # body flies through the scene. T_pas_GP1_CgP1_to_E_Eo holds the passive
+    # transformation from the first Airplane's geometry axes (relative to its CG) to Earth
+    # axes (relative to the Earth origin) for the drawn time step, and stays None for the
+    # standard body-fixed rendering in geometry axes.
+    is_free_flight = isinstance(
+        solver,
+        free_flight_unsteady_ring_vortex_lattice_method.FreeFlightUnsteadyRingVortexLatticeMethodSolver,
+    )
+    T_pas_GP1_CgP1_to_E_Eo: np.ndarray | None = None
+
     # Get the solver's geometry and OperatingPoint.
     if isinstance(
         solver,
@@ -221,11 +271,18 @@ def draw(
         draw_operating_point = solver.steady_problems[draw_step].operating_point
         qInf__E = draw_operating_point.qInf__E
 
-        # If showing wake RingVortices, get their surfaces and plot them.
+        if is_free_flight:
+            T_pas_GP1_CgP1_to_E_Eo = _get_T_pas_GP1_CgP1_to_E_Eo(draw_operating_point)
+
+        # If showing wake ring vortices, get their surfaces and plot them.
         if show_wake_vortices:
             wake_ring_vortex_surfaces = _get_wake_ring_vortex_surfaces(
                 solver, draw_step
             )
+            if T_pas_GP1_CgP1_to_E_Eo is not None:
+                wake_ring_vortex_surfaces = _transform_mesh(
+                    wake_ring_vortex_surfaces, T_pas_GP1_CgP1_to_E_Eo
+                )
             plotter.add_mesh(
                 wake_ring_vortex_surfaces,
                 show_edges=True,
@@ -237,14 +294,16 @@ def draw(
         draw_operating_point = solver.operating_point
         qInf__E = draw_operating_point.qInf__E
 
-    # Get the Panel surfaces.
+    # Get the Panel surfaces, mapping them into Earth axes for free flight.
     panel_surfaces = _get_panel_surfaces(airplanes)
+    if T_pas_GP1_CgP1_to_E_Eo is not None:
+        panel_surfaces = _transform_mesh(panel_surfaces, T_pas_GP1_CgP1_to_E_Eo)
 
     # Plot the Panels either with scalar coloring or with a uniform color.
     if scalar_type in ("induced drag", "side force", "lift"):
         these_scalars = _get_scalars(airplanes, scalar_type, qInf__E)
-        min_scalar = round(min(these_scalars), 2)
-        max_scalar = round(max(these_scalars), 2)
+        min_scalar = float(min(these_scalars))
+        max_scalar = float(max(these_scalars))
 
         # Choose the color map and set its limits based on if the min and max scalars
         # have the same sign (sequential color map) or if they have different signs
@@ -266,6 +325,7 @@ def draw(
             c_min = -_color_map_num_sig * float(np.std(these_scalars))
             c_max = _color_map_num_sig * float(np.std(these_scalars))
 
+        T_reflect = draw_operating_point.surfaceReflect_T_act_GP1_CgP1
         _plot_scalars(
             plotter,
             these_scalars,
@@ -276,6 +336,7 @@ def draw(
             c_min,
             c_max,
             panel_surfaces,
+            text_color=_text_color_surface if T_reflect is not None else _text_color,
         )
     else:
         plotter.add_mesh(
@@ -284,9 +345,19 @@ def draw(
             color=_panel_color,
             smooth_shading=False,
         )
-
-    T_reflect = draw_operating_point.surfaceReflect_T_act_GP1_CgP1
+        T_reflect = draw_operating_point.surfaceReflect_T_act_GP1_CgP1
     image_surface_mesh = None
+
+    # For free flight, the active reflection is represented in geometry axes, but the
+    # geometry has been mapped into Earth axes. Re-expressing the reflection in Earth axes
+    # (a change of basis by the same passive transformation) lets the reflected-geometry
+    # code below operate entirely in Earth axes.
+    if T_pas_GP1_CgP1_to_E_Eo is not None and T_reflect is not None:
+        T_reflect = (
+            T_pas_GP1_CgP1_to_E_Eo
+            @ T_reflect
+            @ _transformations.invert_T_pas(T_pas_GP1_CgP1_to_E_Eo)
+        )
 
     # If an image surface is defined, add reflected geometry. The image surface plane
     # is added later, after the geometry bounds are captured.
@@ -316,7 +387,7 @@ def draw(
                 smooth_shading=False,
             )
 
-        # Add reflected wake RingVortex surfaces if they are being shown.
+        # Add reflected wake ring vortex surfaces if they are being shown.
         if show_wake_vortices:
             plotter.add_mesh(
                 _reflect_mesh(wake_ring_vortex_surfaces, T_reflect),
@@ -346,6 +417,15 @@ def draw(
                     point = stackStreamlinePoints_GP1_CgP1[point_index, :]
                     last_point = stackStreamlinePoints_GP1_CgP1[point_index - 1, :]
 
+                    # For free flight, map the segment into Earth axes.
+                    if T_pas_GP1_CgP1_to_E_Eo is not None:
+                        point = _transformations.apply_T_to_vectors(
+                            T_pas_GP1_CgP1_to_E_Eo, point, is_position=True
+                        )
+                        last_point = _transformations.apply_T_to_vectors(
+                            T_pas_GP1_CgP1_to_E_Eo, last_point, is_position=True
+                        )
+
                     # Add a line to make this segment of the streamline.
                     plotter.add_mesh(
                         pv.Line(
@@ -364,12 +444,12 @@ def draw(
                         reflected_point = _transformations.apply_T_to_vectors(
                             T_reflect,
                             point,
-                            has_point=True,
+                            is_position=True,
                         )
                         reflected_last_point = _transformations.apply_T_to_vectors(
                             T_reflect,
                             last_point,
-                            has_point=True,
+                            is_position=True,
                         )
                         plotter.add_mesh(
                             pv.Line(
@@ -390,21 +470,67 @@ def draw(
     # (including the image surface).
     if T_reflect is not None:
         geometry_bounds = plotter.bounds
-        image_surface_result = _get_image_surface_mesh_and_texture(
-            draw_operating_point, geometry_bounds
-        )
-        assert image_surface_result is not None
-        image_surface_mesh, image_surface_texture = image_surface_result
+        if T_pas_GP1_CgP1_to_E_Eo is not None:
+            # The image surface helper builds the plane from geometry-axis quantities, so
+            # it needs geometry-axis bounds. Build the plane there, then map it into Earth
+            # axes to match the rendered geometry.
+            geometry_axis_bounds = _get_panel_surfaces(airplanes).bounds
+            image_surface_result = _get_image_surface_mesh_and_texture(
+                draw_operating_point, geometry_axis_bounds
+            )
+            assert image_surface_result is not None
+            image_surface_mesh, image_surface_texture = image_surface_result
+            image_surface_mesh = _transform_mesh(
+                image_surface_mesh, T_pas_GP1_CgP1_to_E_Eo
+            )
+        else:
+            image_surface_result = _get_image_surface_mesh_and_texture(
+                draw_operating_point, geometry_bounds
+            )
+            assert image_surface_result is not None
+            image_surface_mesh, image_surface_texture = image_surface_result
         plotter.add_mesh(
             image_surface_mesh,
             texture=image_surface_texture,
             opacity=_image_surface_opacity,
             smooth_shading=True,
         )
-        plotter.camera.position = (-1, -1, 1)
-        plotter.camera.focal_point = (0, 0, 0)
-        plotter.camera.up = (0, 0, 1)
-        plotter.reset_camera(bounds=geometry_bounds)  # type: ignore[call-arg]
+
+        # For the standard body-fixed rendering, fit the camera to the geometry bounds
+        # so the much larger image surface plane does not dominate the view. Free flight
+        # uses its own Earth-axes camera, computed below.
+        if T_pas_GP1_CgP1_to_E_Eo is None:
+            plotter.camera.position = (-1, -1, 1)
+            plotter.camera.focal_point = (0, 0, 0)
+            plotter.camera.up = (0, 0, 1)
+            plotter.reset_camera(bounds=geometry_bounds)  # type: ignore[call-arg]
+
+    # Choose the camera position. Free flight frames the body in Earth axes with physical
+    # up as Earth -z. The standard rendering views geometry axes from (-1, -1, 1), unless
+    # an image surface is present, in which case the camera was already fitted above and
+    # cpos is left None so show() does not auto-fit to the large image surface plane.
+    draw_cpos: tuple | None
+    if is_free_flight:
+        # Aim the camera along the Earth-axes view direction with physical up, then fit
+        # the parallel projection to the rendered geometry. The camera is set explicitly
+        # here (rather than via cpos) so that show() preserves the fit, since passing a
+        # full position to cpos would not set the parallel projection's scale.
+        airplane_bounds = np.array(panel_surfaces.bounds, dtype=float)
+        center_E_Eo = 0.5 * (airplane_bounds[1::2] + airplane_bounds[::2])
+        airplane_diagonal = float(
+            np.linalg.norm(airplane_bounds[1::2] - airplane_bounds[::2])
+        )
+        plotter.camera.focal_point = tuple(center_E_Eo)
+        plotter.camera.position = tuple(
+            center_E_Eo + 3.0 * airplane_diagonal * _free_flight_view_direction_E
+        )
+        plotter.camera.up = _free_flight_view_up_E
+        plotter.reset_camera()  # type: ignore[call-arg]
+        draw_cpos = None
+    elif image_surface_mesh is None:
+        draw_cpos = (-1, -1, 1)
+    else:
+        draw_cpos = None
 
     # Set the Plotter's background color.
     plotter.set_background(color=_plotter_background_color)  # type: ignore[call-arg]
@@ -414,7 +540,7 @@ def draw(
         # it can later be saved as an image if desired.
         plotter.show(
             title="Orient the view, then press any key to continue.",
-            cpos=(-1, -1, 1) if image_surface_mesh is None else None,
+            cpos=draw_cpos,
             full_screen=False,
             auto_close=False,
         )
@@ -422,7 +548,7 @@ def draw(
         # Show the Plotter for 1 second, then proceed automatically. This is useful
         # for testing.
         plotter.show(
-            cpos=(-1, -1, 1) if image_surface_mesh is None else None,
+            cpos=draw_cpos,
             full_screen=False,
             interactive=False,
             auto_close=False,
@@ -443,7 +569,7 @@ def draw(
         )
 
         webp.save_image(
-            img=image, file_path="Draw.webp", lossless=False, quality=_quality
+            img=image, file_path="draw.webp", lossless=False, quality=_quality
         )
 
     # Close all Plotters.
@@ -457,19 +583,28 @@ def animate(
     save: bool | np.bool_ = False,
     testing: bool | np.bool_ = False,
 ) -> None:
-    """Animates an UnsteadyRingVortexLatticeMethodSolver's Airplane(s).
+    """Animates the Airplane(s) of an UnsteadyRingVortexLatticeMethodSolver or one of
+    its subclasses (the aeroelastic or free flight solver).
+
+    For a FreeFlightUnsteadyRingVortexLatticeMethodSolver, each time step's geometry is
+    rendered in Earth axes at its true position and orientation, so the body flies
+    through the scene along its trajectory rather than staying fixed while the wake
+    streams behind it. The camera frames the whole trajectory.
 
     :param unsteady_solver: The UnsteadyRingVortexLatticeMethodSolver whose Airplane(s)
-        will be animated.
+        will be animated. Its subclasses, the
+        AeroelasticUnsteadyRingVortexLatticeMethodSolver and the
+        FreeFlightUnsteadyRingVortexLatticeMethodSolver, are also accepted.
     :param scalar_type: Determines how to color the Panels. Setting this to None colors
         the Panels uniformly. If the solver has been run, it can also be "induced drag",
         "side force", or "lift", which respectively use each Panel's induced drag, side
         force, and lift coefficient. The default is None.
-    :param show_wake_vortices: Set this to True to show any wake RingVortices. If True,
+    :param show_wake_vortices: Set this to True to show any wake ring vortices. If True,
         the solver must have already been run. Can be a bool or a numpy bool and will be
         converted internally to a bool. The default is False.
-    :param save: Set this to True to save the image as a WebP. It can be a bool or a
-        numpy bool and will be converted internally to a bool. The default is False.
+    :param save: Set this to True to save the animation as an animated WebP. It can be a
+        bool or a numpy bool and will be converted internally to a bool. The default is
+        False.
     :param testing: Set this to True to start the animation after one second, which is
         useful for running test suites. It can be a bool or a numpy bool and will be
         converted internally to a bool. The default is False.
@@ -477,7 +612,7 @@ def animate(
     """
     if not isinstance(
         unsteady_solver,
-        (unsteady_ring_vortex_lattice_method.UnsteadyRingVortexLatticeMethodSolver,),
+        unsteady_ring_vortex_lattice_method.UnsteadyRingVortexLatticeMethodSolver,
     ):
         raise TypeError(
             "unsteady_solver must be an UnsteadyRingVortexLatticeMethodSolver."
@@ -517,6 +652,22 @@ def animate(
     for steady_problem in unsteady_solver.steady_problems:
         step_airplanes.append(steady_problem.airplanes)
 
+    # For a free flight solver, each time step's geometry is rendered in its true Earth-
+    # frame pose so the body flies through the scene. step_transforms holds, per time
+    # step, the passive transformation from the first Airplane's geometry axes (relative
+    # to its CG) to Earth axes (relative to the Earth origin). It stays empty for the
+    # standard body-fixed rendering in geometry axes.
+    is_free_flight = isinstance(
+        unsteady_solver,
+        free_flight_unsteady_ring_vortex_lattice_method.FreeFlightUnsteadyRingVortexLatticeMethodSolver,
+    )
+    step_transforms: list[np.ndarray] = []
+    if is_free_flight:
+        step_transforms = [
+            _get_T_pas_GP1_CgP1_to_E_Eo(steady_problem.operating_point)
+            for steady_problem in unsteady_solver.steady_problems
+        ]
+
     # Scale down the true-speed frames per second to at most 50 fps. This is the
     # maximum speed at which some programs can render WebPs.
     requested_fps = 1.0 / unsteady_solver.delta_time
@@ -533,16 +684,6 @@ def animate(
     c_min = 0.0
     c_max = 0.0
     color_map: str = ""
-
-    # If saving the animation, add text that displays its speed.
-    if save:
-        plotter.add_text(
-            text="Speed: " + str(round(100 * speed)) + "%",
-            position=_text_speed_position,
-            font_size=_text_font_size,
-            viewport=True,
-            color=_text_color,
-        )
 
     # Initialize variables to hold the SteadyProblems' scalars and their attributes.
     all_scalars = np.empty(0, dtype=float)
@@ -580,8 +721,8 @@ def animate(
             c_min = -_color_map_num_sig * float(np.std(all_scalars))
             c_max = _color_map_num_sig * float(np.std(all_scalars))
 
-        min_scalar = round(min(all_scalars), 2)
-        max_scalar = round(max(all_scalars), 2)
+        min_scalar = float(min(all_scalars))
+        max_scalar = float(max(all_scalars))
 
     # Pre-compute the image surface mesh and reflection matrix from the last time
     # step's geometry so that the plane is large enough to encompass the fully
@@ -594,7 +735,30 @@ def animate(
         last_step
     ].operating_point
     T_reflect = last_step_operating_point.surfaceReflect_T_act_GP1_CgP1
-    if T_reflect is not None:
+    animate_text_color = _text_color_surface if T_reflect is not None else _text_color
+    image_surface_geometry_bounds = None
+    if is_free_flight:
+        if T_reflect is not None:
+            # The image surface is fixed in the world, so build its plane once from the
+            # last step's geometry-axis quantities, then map it into Earth axes. Re-
+            # expressing the reflection in Earth axes (a change of basis by the same
+            # passive transformation) lets the reflected geometry be built from the
+            # Earth-axes panels each frame.
+            T_pas_last = step_transforms[last_step]
+            geometry_axis_bounds = _get_panel_surfaces(step_airplanes[last_step]).bounds
+            image_surface_result = _get_image_surface_mesh_and_texture(
+                last_step_operating_point, geometry_axis_bounds
+            )
+            assert image_surface_result is not None
+            image_surface_mesh, image_surface_texture = image_surface_result
+            image_surface_mesh = _transform_mesh(image_surface_mesh, T_pas_last)
+            T_reflect = (
+                T_pas_last @ T_reflect @ _transformations.invert_T_pas(T_pas_last)
+            )
+        else:
+            image_surface_mesh = None
+            image_surface_texture = None
+    elif T_reflect is not None:
         last_step_panel_surfaces = _get_panel_surfaces(step_airplanes[last_step])
         reflected_last_step_panel_surfaces = _reflect_mesh(
             last_step_panel_surfaces, T_reflect
@@ -625,10 +789,92 @@ def animate(
     else:
         image_surface_mesh = None
         image_surface_texture = None
-        image_surface_geometry_bounds = None
 
-    # Get the Panel surfaces of the first time step's Airplane(s).
+    # For free flight, compute a fixed camera that frames the whole trajectory. The body
+    # moves through the scene, so the camera is centered on the trajectory's midpoint and
+    # the parallel scale is fit to the projected extent of the trajectory's geometry so
+    # the whole glide stays in view. The clipping range is sized later, after the user has
+    # oriented the view, so it tracks the user's chosen camera rather than the default.
+    free_flight_cpos: list | None = None
+    free_flight_parallel_scale = 0.0
+    free_flight_clip_meshes: list = []
+    if is_free_flight:
+        initialPosition_E_Eo = unsteady_solver.steady_problems[
+            0
+        ].operating_point.CgP1_E_Eo
+        finalPosition_E_Eo = last_step_operating_point.CgP1_E_Eo
+        trajectoryMidpoint_E_Eo = 0.5 * (initialPosition_E_Eo + finalPosition_E_Eo)
+        trajectory_extent = float(
+            np.linalg.norm(finalPosition_E_Eo - initialPosition_E_Eo)
+        )
+
+        # Map the first and last frames' Panel surfaces into Earth axes. These two frames
+        # bound the trajectory, so their combined extent frames the whole glide.
+        first_step_panel_surfaces = _transform_mesh(
+            _get_panel_surfaces(step_airplanes[0]), step_transforms[0]
+        )
+        last_step_panel_surfaces = _transform_mesh(
+            _get_panel_surfaces(step_airplanes[last_step]),
+            step_transforms[last_step],
+        )
+        airplane_bounds = np.array(first_step_panel_surfaces.bounds, dtype=float)
+        airplane_diagonal = float(
+            np.linalg.norm(airplane_bounds[1::2] - airplane_bounds[::2])
+        )
+
+        # Aim the camera along the Earth-axes view direction with physical up, centered on
+        # the trajectory's midpoint and far enough back to clear the geometry at both ends.
+        padding = max(2.0 * airplane_diagonal, 0.5 * trajectory_extent)
+        camera_distance = trajectory_extent + padding
+        cameraPosition_E_Eo = (
+            trajectoryMidpoint_E_Eo + camera_distance * _free_flight_view_direction_E
+        )
+        free_flight_cpos = [
+            tuple(cameraPosition_E_Eo),
+            tuple(trajectoryMidpoint_E_Eo),
+            _free_flight_view_up_E,
+        ]
+
+        # Collect the geometry that frames the trajectory: the body at both ends, plus the
+        # last frame's wake (the largest) if it is shown. The last frame's surfaces are
+        # reused below to size the clipping range after the user orients the view.
+        framing_meshes = [first_step_panel_surfaces, last_step_panel_surfaces]
+        free_flight_clip_meshes = [last_step_panel_surfaces]
+        if show_wake_vortices:
+            last_step_wake_surfaces = _transform_mesh(
+                _get_wake_ring_vortex_surfaces(unsteady_solver, last_step),
+                step_transforms[last_step],
+            )
+            if last_step_wake_surfaces.n_points > 0:
+                framing_meshes.append(last_step_wake_surfaces)
+                free_flight_clip_meshes.append(last_step_wake_surfaces)
+
+        # Fit the parallel scale (half the viewport height in world units, since the
+        # projection is parallel) to the projected extent of that geometry about the focal
+        # point. This frames the glide snugly; the user can rescale interactively before
+        # the animation is captured.
+        free_flight_parallel_scale = _free_flight_fit_parallel_scale(
+            framing_meshes,
+            trajectoryMidpoint_E_Eo,
+            _free_flight_view_direction_E,
+            _free_flight_view_up_E,
+        )
+
+    # If saving the animation, add text that displays its speed.
+    if save:
+        plotter.add_text(
+            text="Speed: " + str(round(100 * speed)) + "%",
+            position=_text_speed_position,
+            font_size=_text_font_size,
+            viewport=True,
+            color=animate_text_color,
+        )
+
+    # Get the Panel surfaces of the first time step's Airplane(s), mapping them into
+    # Earth axes for free flight.
     panel_surfaces = _get_panel_surfaces(step_airplanes[0])
+    if is_free_flight:
+        panel_surfaces = _transform_mesh(panel_surfaces, step_transforms[0])
 
     # Plot the first time step's Airplanes' Panels either with scalar coloring or
     # with a uniform color.
@@ -649,6 +895,7 @@ def animate(
             c_min,
             c_max,
             panel_surfaces,
+            text_color=_text_color_surface if T_reflect is not None else _text_color,
         )
     else:
         plotter.add_mesh(
@@ -703,10 +950,34 @@ def animate(
             opacity=_image_surface_opacity,
             smooth_shading=True,
         )
-        plotter.camera.position = (-1, -1, 1)
-        plotter.camera.focal_point = (0, 0, 0)
-        plotter.camera.up = (0, 0, 1)
-        plotter.reset_camera(bounds=image_surface_geometry_bounds)  # type: ignore[call-arg]
+
+        # For the standard body-fixed rendering, fit the camera to the geometry bounds
+        # so the much larger image surface plane does not dominate the view. Free flight
+        # uses its own trajectory-framing camera, applied below.
+        if not is_free_flight:
+            plotter.camera.position = (-1, -1, 1)
+            plotter.camera.focal_point = (0, 0, 0)
+            plotter.camera.up = (0, 0, 1)
+            plotter.reset_camera(bounds=image_surface_geometry_bounds)  # type: ignore[call-arg]
+
+    # Choose the camera position. Free flight sets its trajectory-framing camera
+    # explicitly (rather than through show()'s cpos) so it survives the mesh additions
+    # above and becomes the default for the held first frame; cpos is then left None so
+    # show() does not reset it, which lets the user's interactive reorientation and
+    # rescaling carry through to the animation. The standard rendering views geometry axes
+    # from (-1, -1, 1), unless an image surface is present, in which case the camera was
+    # already fitted above and cpos is left None so show() does not auto-fit to the large
+    # image surface plane.
+    animate_cpos: tuple | list | None
+    if is_free_flight:
+        assert free_flight_cpos is not None
+        plotter.camera_position = free_flight_cpos
+        plotter.camera.parallel_scale = free_flight_parallel_scale
+        animate_cpos = None
+    elif image_surface_mesh is None:
+        animate_cpos = (-1, -1, 1)
+    else:
+        animate_cpos = None
 
     # Set the Plotter's background color.
     plotter.set_background(color=_plotter_background_color)  # type: ignore[call-arg]
@@ -718,20 +989,36 @@ def animate(
     if not testing:
         plotter.show(
             title="Orient the view, then press any key to produce the animation.",
-            cpos=(-1, -1, 1) if image_surface_mesh is None else None,
+            cpos=animate_cpos,
             full_screen=False,
             auto_close=False,
         )
+        assert plotter.ren_win is not None
         plotter.ren_win.SetWindowName("Rendering speed not to scale.")
     else:
         plotter.show(
             title="Rendering speed not to scale.",
-            cpos=(-1, -1, 1) if image_surface_mesh is None else None,
+            cpos=animate_cpos,
             full_screen=False,
             interactive=False,
             auto_close=False,
         )
         time.sleep(1)
+
+    # The user may have reoriented or rescaled the view during the held first frame.
+    # Preserve that camera and only size the clipping range so every frame stays visible:
+    # temporarily add the last frame's geometry (the first frame's is already present), fit
+    # the clipping range to both, then remove the temporary actors. The body moves through
+    # the scene, so a clipping range fit to the first frame alone would clip later frames.
+    if is_free_flight:
+        temporary_actors = [
+            plotter.add_mesh(clip_mesh) for clip_mesh in free_flight_clip_meshes
+        ]
+        plotter.reset_camera_clipping_range()
+        free_flight_clipping_range = plotter.camera.clipping_range
+        for temporary_actor in temporary_actors:
+            plotter.remove_actor(temporary_actor)
+        plotter.camera.clipping_range = free_flight_clipping_range
 
     # Start a list to hold a WebP Image of each frame. To start, take a screenshot,
     # convert it to a ndarray, and convert that to an Image.
@@ -755,8 +1042,13 @@ def animate(
         # Clear the Plotter.
         plotter.clear()
 
-        # Get the Panel surfaces of this time step's Airplane(s).
+        # Get the Panel surfaces of this time step's Airplane(s), mapping them into Earth
+        # axes for free flight.
         panel_surfaces = _get_panel_surfaces(airplanes)
+        if is_free_flight:
+            panel_surfaces = _transform_mesh(
+                panel_surfaces, step_transforms[current_step]
+            )
 
         # If saving the animation, add text that displays its speed.
         if save:
@@ -765,14 +1057,18 @@ def animate(
                 position=_text_speed_position,
                 font_size=_text_font_size,
                 viewport=True,
-                color=_text_color,
+                color=animate_text_color,
             )
 
-        # If showing wake RingVortices, get their surfaces and plot them.
+        # If showing wake ring vortices, get their surfaces and plot them.
         if show_wake_vortices:
             wake_ring_vortex_surfaces = _get_wake_ring_vortex_surfaces(
                 unsteady_solver, current_step
             )
+            if is_free_flight:
+                wake_ring_vortex_surfaces = _transform_mesh(
+                    wake_ring_vortex_surfaces, step_transforms[current_step]
+                )
             plotter.add_mesh(
                 wake_ring_vortex_surfaces,
                 show_edges=True,
@@ -799,6 +1095,9 @@ def animate(
                 c_min,
                 c_max,
                 panel_surfaces,
+                text_color=(
+                    _text_color_surface if T_reflect is not None else _text_color
+                ),
             )
         else:
             plotter.add_mesh(
@@ -835,7 +1134,7 @@ def animate(
                     smooth_shading=False,
                 )
 
-            # Add reflected wake RingVortex surfaces if they are being shown.
+            # Add reflected wake ring vortex surfaces if they are being shown.
             if show_wake_vortices:
                 plotter.add_mesh(
                     _reflect_mesh(wake_ring_vortex_surfaces, T_reflect),
@@ -852,6 +1151,15 @@ def animate(
                 opacity=_image_surface_opacity,
                 smooth_shading=True,
             )
+
+        # If an image surface is present, force VTK to recalculate the scalar bar
+        # layout. Adding the image surface mesh with opacity causes VTK's
+        # UnconstrainedFontSize layout to misposition the left label (PyVista
+        # issue #7516).
+        if T_reflect is not None:
+            for scalar_bar_actor in plotter.scalar_bars.values():
+                scalar_bar_actor.Modified()
+            plotter.render()
 
         # If saving, append a WebP Image of this frame to the list of Images. To do
         # so, take a screenshot, convert it to a ndarray, and convert that to an Image.
@@ -875,7 +1183,7 @@ def animate(
     if save:
         # Convert the list of WebP Images to an WebP animation.
         webp.save_images(
-            images, "Animate.webp", fps=actual_fps, lossless=False, quality=_quality
+            images, "animate.webp", fps=actual_fps, lossless=False, quality=_quality
         )
 
     # Close all the Plotters.
@@ -887,11 +1195,22 @@ def plot_results_versus_time(
     show: bool | np.bool_ = True,
     save: bool | np.bool_ = False,
 ) -> None:
-    """Plots an UnsteadyRingVortexLatticeMethodSolver's loads and load coefficients as a
-    function of time.
+    """Plots the loads and load coefficients of an UnsteadyRingVortexLatticeMethodSolver
+    or one of its subclasses (the aeroelastic or free flight solver) as a function of
+    time.
+
+    For a FreeFlightUnsteadyRingVortexLatticeMethodSolver, this also plots the first
+    Airplane's six-degree-of-freedom state history: its position, velocity, orientation,
+    angular velocity, and aerodynamic angles versus time. These describe the first
+    Airplane, the rigid body the dynamics integrate, so they are plotted once for the
+    whole simulation rather than per Airplane.
 
     :param unsteady_solver: The UnsteadyRingVortexLatticeMethodSolver whose loads and
-        load coefficients will be plotted.
+        load coefficients will be plotted. Its subclasses, the
+        AeroelasticUnsteadyRingVortexLatticeMethodSolver and the
+        FreeFlightUnsteadyRingVortexLatticeMethodSolver, are also accepted. For a
+        FreeFlightUnsteadyRingVortexLatticeMethodSolver, the first Airplane's state
+        history is plotted as well.
     :param show: Set this to True to show the plots. It can be a bool or a numpy bool
         and will be converted internally to a bool. The default is True.
     :param save: Set this to True to save the plots as PNGs. It can be a bool or a numpy
@@ -986,32 +1305,32 @@ def plot_results_versus_time(
         moment_coefficients_axes.spines.top.set_visible(False)
 
         # Format all the plots' spine and label colors.
-        force_axes.spines.bottom.set_color(_text_color)
-        force_axes.spines.left.set_color(_text_color)
-        force_axes.xaxis.label.set_color(_text_color)
-        force_axes.yaxis.label.set_color(_text_color)
-        force_coefficients_axes.spines.bottom.set_color(_text_color)
-        force_coefficients_axes.spines.left.set_color(_text_color)
-        force_coefficients_axes.xaxis.label.set_color(_text_color)
-        force_coefficients_axes.yaxis.label.set_color(_text_color)
-        moment_coefficients_axes.spines.bottom.set_color(_text_color)
-        moment_coefficients_axes.spines.left.set_color(_text_color)
-        moment_coefficients_axes.xaxis.label.set_color(_text_color)
-        moment_coefficients_axes.yaxis.label.set_color(_text_color)
-        moment_axes.spines.bottom.set_color(_text_color)
-        moment_axes.spines.left.set_color(_text_color)
-        moment_axes.xaxis.label.set_color(_text_color)
-        moment_axes.yaxis.label.set_color(_text_color)
+        force_axes.spines.bottom.set_color(_text_color_normalized)
+        force_axes.spines.left.set_color(_text_color_normalized)
+        force_axes.xaxis.label.set_color(_text_color_normalized)
+        force_axes.yaxis.label.set_color(_text_color_normalized)
+        force_coefficients_axes.spines.bottom.set_color(_text_color_normalized)
+        force_coefficients_axes.spines.left.set_color(_text_color_normalized)
+        force_coefficients_axes.xaxis.label.set_color(_text_color_normalized)
+        force_coefficients_axes.yaxis.label.set_color(_text_color_normalized)
+        moment_coefficients_axes.spines.bottom.set_color(_text_color_normalized)
+        moment_coefficients_axes.spines.left.set_color(_text_color_normalized)
+        moment_coefficients_axes.xaxis.label.set_color(_text_color_normalized)
+        moment_coefficients_axes.yaxis.label.set_color(_text_color_normalized)
+        moment_axes.spines.bottom.set_color(_text_color_normalized)
+        moment_axes.spines.left.set_color(_text_color_normalized)
+        moment_axes.xaxis.label.set_color(_text_color_normalized)
+        moment_axes.yaxis.label.set_color(_text_color_normalized)
 
         # Format all the plots' tick colors.
-        force_axes.tick_params(axis="x", colors=_text_color)
-        force_axes.tick_params(axis="y", colors=_text_color)
-        force_coefficients_axes.tick_params(axis="x", colors=_text_color)
-        force_coefficients_axes.tick_params(axis="y", colors=_text_color)
-        moment_coefficients_axes.tick_params(axis="x", colors=_text_color)
-        moment_coefficients_axes.tick_params(axis="y", colors=_text_color)
-        moment_axes.tick_params(axis="x", colors=_text_color)
-        moment_axes.tick_params(axis="y", colors=_text_color)
+        force_axes.tick_params(axis="x", colors=_text_color_normalized)
+        force_axes.tick_params(axis="y", colors=_text_color_normalized)
+        force_coefficients_axes.tick_params(axis="x", colors=_text_color_normalized)
+        force_coefficients_axes.tick_params(axis="y", colors=_text_color_normalized)
+        moment_coefficients_axes.tick_params(axis="x", colors=_text_color_normalized)
+        moment_coefficients_axes.tick_params(axis="y", colors=_text_color_normalized)
+        moment_axes.tick_params(axis="x", colors=_text_color_normalized)
+        moment_axes.tick_params(axis="y", colors=_text_color_normalized)
 
         # Format all the plots' background colors.
         force_figure.patch.set_facecolor(_figure_background_color)
@@ -1023,177 +1342,323 @@ def plot_results_versus_time(
         moment_coefficients_figure.patch.set_facecolor(_figure_background_color)
         moment_coefficients_axes.set_facecolor(_figure_background_color)
 
-        # Populate the plots.
+        # Populate the plots. Lines are drawn from thickest to thinnest so that
+        # all three remain visible even when the curves overlap.
+        _widths_3 = np.linspace(_max_line_width, _min_line_width, 3)
         force_axes.plot(
             times,
             -forces_W[airplane_id, 0],
             label="Induced Drag",
-            color=_drag_color,
-            marker=".",
-            markevery=(_marker_spacing * 0 / 3, _marker_spacing),
-            markersize=_marker_size,
+            color=_linear_x_color,
+            linewidth=_widths_3[0],
+            solid_capstyle="butt",
         )
         force_axes.plot(
             times,
             forces_W[airplane_id, 1],
             label="Side Force",
-            color=_side_color,
-            marker=".",
-            markevery=(_marker_spacing * 1 / 3, _marker_spacing),
-            markersize=_marker_size,
+            color=_linear_y_color,
+            linewidth=_widths_3[1],
+            solid_capstyle="butt",
         )
         force_axes.plot(
             times,
             -forces_W[airplane_id, 2],
             label="Lift",
-            color=_lift_color,
-            marker=".",
-            markevery=(_marker_spacing * 2 / 3, _marker_spacing),
-            markersize=_marker_size,
+            color=_linear_z_color,
+            linewidth=_widths_3[2],
+            solid_capstyle="butt",
         )
         force_coefficients_axes.plot(
             times,
             -forceCoefficients_W[airplane_id, 0],
             label="Induced Drag Coefficient",
-            color=_drag_color,
-            marker=".",
-            markevery=(_marker_spacing * 0 / 3, _marker_spacing),
-            markersize=_marker_size,
+            color=_linear_x_color,
+            linewidth=_widths_3[0],
+            solid_capstyle="butt",
         )
         force_coefficients_axes.plot(
             times,
             forceCoefficients_W[airplane_id, 1],
             label="Side Force Coefficient",
-            color=_side_color,
-            marker=".",
-            markevery=(_marker_spacing * 1 / 3, _marker_spacing),
-            markersize=_marker_size,
+            color=_linear_y_color,
+            linewidth=_widths_3[1],
+            solid_capstyle="butt",
         )
         force_coefficients_axes.plot(
             times,
             -forceCoefficients_W[airplane_id, 2],
             label="Lift Coefficient",
-            color=_lift_color,
-            marker=".",
-            markevery=(_marker_spacing * 2 / 3, _marker_spacing),
-            markersize=_marker_size,
+            color=_linear_z_color,
+            linewidth=_widths_3[2],
+            solid_capstyle="butt",
         )
         moment_axes.plot(
             times,
             moments_W_CgP1[airplane_id, 0],
-            label="Roll",
-            color=_roll_color,
-            marker=".",
-            markevery=(_marker_spacing * 0 / 3, _marker_spacing),
-            markersize=_marker_size,
+            label="Rolling Moment",
+            color=_angular_x_color,
+            linewidth=_widths_3[0],
+            solid_capstyle="butt",
         )
         moment_axes.plot(
             times,
             moments_W_CgP1[airplane_id, 1],
-            label="Pitch",
-            color=_pitch_color,
-            marker=".",
-            markevery=(_marker_spacing * 1 / 3, _marker_spacing),
-            markersize=_marker_size,
+            label="Pitching Moment",
+            color=_angular_y_color,
+            linewidth=_widths_3[1],
+            solid_capstyle="butt",
         )
         moment_axes.plot(
             times,
             moments_W_CgP1[airplane_id, 2],
-            label="Yaw",
-            color=_yaw_color,
-            marker=".",
-            markevery=(_marker_spacing * 2 / 3, _marker_spacing),
-            markersize=_marker_size,
+            label="Yawing Moment",
+            color=_angular_z_color,
+            linewidth=_widths_3[2],
+            solid_capstyle="butt",
         )
         moment_coefficients_axes.plot(
             times,
             momentCoefficients_W_CgP1[airplane_id, 0],
-            label="Roll Coefficient",
-            color=_roll_color,
-            marker=".",
-            markevery=(_marker_spacing * 0 / 3, _marker_spacing),
-            markersize=_marker_size,
+            label="Rolling Moment Coefficient",
+            color=_angular_x_color,
+            linewidth=_widths_3[0],
+            solid_capstyle="butt",
         )
         moment_coefficients_axes.plot(
             times,
             momentCoefficients_W_CgP1[airplane_id, 1],
-            label="Pitch Coefficient",
-            color=_pitch_color,
-            marker=".",
-            markevery=(_marker_spacing * 1 / 3, _marker_spacing),
-            markersize=_marker_size,
+            label="Pitching Moment Coefficient",
+            color=_angular_y_color,
+            linewidth=_widths_3[1],
+            solid_capstyle="butt",
         )
         moment_coefficients_axes.plot(
             times,
             momentCoefficients_W_CgP1[airplane_id, 2],
-            label="Yaw Coefficient",
-            color=_yaw_color,
-            marker=".",
-            markevery=(_marker_spacing * 2 / 3, _marker_spacing),
-            markersize=_marker_size,
+            label="Yawing Moment Coefficient",
+            color=_angular_z_color,
+            linewidth=_widths_3[2],
+            solid_capstyle="butt",
         )
 
         # Find and format this Airplane's name for use in the plot titles.
         airplane_name = unsteady_solver.steady_problems[0].airplanes[airplane_id].name
-        force_title = airplane_name + " Forces vs. Time"
-        force_coefficient_title = airplane_name + " Force Coefficients vs. Time"
-        moment_title = airplane_name + " Moments vs. Time"
-        moment_coefficient_title = airplane_name + " Moment Coefficients vs. Time"
+        airplane_name_snake = airplane_name.lower().replace(" ", "_")
+        force_title = airplane_name + " Forces"
+        force_coefficient_title = airplane_name + " Force Coefficients"
+        moment_title = airplane_name + " Moments"
+        moment_coefficient_title = airplane_name + " Moment Coefficients"
+        force_subtitle = "(in Wind Axes)"
+        force_coefficient_subtitle = "(in Wind Axes)"
+        moment_subtitle = "(in Wind Axes, Relative to the First Airplane's CG)"
+        moment_coefficient_subtitle = (
+            "(in Wind Axes, Relative to the First Airplane's CG)"
+        )
 
-        # Name the plots' axis labels and titles.
-        force_axes.set_xlabel("Time (s)", color=_text_color)
-        force_axes.set_ylabel("Force (N)", color=_text_color)
-        force_axes.set_title(force_title, color=_text_color)
-        force_coefficients_axes.set_xlabel("Time (s)", color=_text_color)
-        force_coefficients_axes.set_ylabel("Force Coefficient", color=_text_color)
-        force_coefficients_axes.set_title(force_coefficient_title, color=_text_color)
-        moment_axes.set_xlabel("Time (s)", color=_text_color)
-        moment_axes.set_ylabel("Moment (N m)", color=_text_color)
-        moment_axes.set_title(moment_title, color=_text_color)
-        moment_coefficients_axes.set_xlabel("Time (s)", color=_text_color)
-        moment_coefficients_axes.set_ylabel("Moment Coefficient", color=_text_color)
-        moment_coefficients_axes.set_title(moment_coefficient_title, color=_text_color)
+        # Name the plots' axis labels, titles, and subtitles. The main title
+        # uses suptitle at the default size, and the subtitle uses set_title at
+        # a smaller size so the two render at different scales.
+        force_axes.set_xlabel("Time (s)", color=_text_color_normalized)
+        force_axes.set_ylabel("Force (N)", color=_text_color_normalized)
+        force_figure.suptitle(force_title, color=_text_color_normalized)
+        force_axes.set_title(
+            force_subtitle, color=_text_color_normalized, fontsize="small"
+        )
+        force_coefficients_axes.set_xlabel("Time (s)", color=_text_color_normalized)
+        force_coefficients_axes.set_ylabel(
+            "Force Coefficient", color=_text_color_normalized
+        )
+        force_coefficients_figure.suptitle(
+            force_coefficient_title, color=_text_color_normalized
+        )
+        force_coefficients_axes.set_title(
+            force_coefficient_subtitle,
+            color=_text_color_normalized,
+            fontsize="small",
+        )
+        moment_axes.set_xlabel("Time (s)", color=_text_color_normalized)
+        moment_axes.set_ylabel("Moment (N m)", color=_text_color_normalized)
+        moment_figure.suptitle(moment_title, color=_text_color_normalized)
+        moment_axes.set_title(
+            moment_subtitle, color=_text_color_normalized, fontsize="small"
+        )
+        moment_coefficients_axes.set_xlabel("Time (s)", color=_text_color_normalized)
+        moment_coefficients_axes.set_ylabel(
+            "Moment Coefficient", color=_text_color_normalized
+        )
+        moment_coefficients_figure.suptitle(
+            moment_coefficient_title, color=_text_color_normalized
+        )
+        moment_coefficients_axes.set_title(
+            moment_coefficient_subtitle,
+            color=_text_color_normalized,
+            fontsize="small",
+        )
 
-        # Format the plots' legends.
+        # Format the plots' legends. The handler map normalizes legend line
+        # widths so the thickness staggering does not appear in the legend.
+        _legend_handler_map = {
+            plt.Line2D: matplotlib.legend_handler.HandlerLine2D(
+                update_func=lambda h, orig: (
+                    h.update_from(orig),
+                    h.set_linewidth(_legend_line_width),
+                )
+            )
+        }
         force_axes.legend(
             facecolor=_figure_background_color,
             edgecolor=_figure_background_color,
-            labelcolor=_text_color,
+            labelcolor=_text_color_normalized,
+            handler_map=_legend_handler_map,
         )
         force_coefficients_axes.legend(
             facecolor=_figure_background_color,
             edgecolor=_figure_background_color,
-            labelcolor=_text_color,
+            labelcolor=_text_color_normalized,
+            handler_map=_legend_handler_map,
         )
         moment_axes.legend(
             facecolor=_figure_background_color,
             edgecolor=_figure_background_color,
-            labelcolor=_text_color,
+            labelcolor=_text_color_normalized,
+            handler_map=_legend_handler_map,
         )
         moment_coefficients_axes.legend(
             facecolor=_figure_background_color,
             edgecolor=_figure_background_color,
-            labelcolor=_text_color,
+            labelcolor=_text_color_normalized,
+            handler_map=_legend_handler_map,
         )
 
         # Save the figures as PNGs if the user wants to do so.
         if save:
             force_figure.savefig(
-                airplane_name + " Forces.png",
+                airplane_name_snake + "_forces.png",
                 dpi=300,
             )
             force_coefficients_figure.savefig(
-                airplane_name + " Force Coefficients.png",
+                airplane_name_snake + "_force_coefficients.png",
                 dpi=300,
             )
             moment_figure.savefig(
-                airplane_name + " Moments.png",
+                airplane_name_snake + "_moments.png",
                 dpi=300,
             )
             moment_coefficients_figure.savefig(
-                airplane_name + " Moment Coefficients.png",
+                airplane_name_snake + "_moment_coefficients.png",
                 dpi=300,
             )
+
+    # For a free flight solver, also plot the first Airplane's six-degree-of-freedom
+    # state history. This is plotted once for the whole simulation, since the state
+    # describes the first Airplane, the single rigid body the dynamics integrate.
+    if isinstance(
+        unsteady_solver,
+        free_flight_unsteady_ring_vortex_lattice_method.FreeFlightUnsteadyRingVortexLatticeMethodSolver,
+    ):
+        # Narrow the movement to a FreeFlightMovement so its operating point history is
+        # typed. The solver type guarantees this, so the assert documents the invariant.
+        movement = unsteady_solver.unsteady_problem.movement
+        assert isinstance(movement, free_flight_movement_mod.FreeFlightMovement)
+        operating_points = movement.operating_point_movement.operating_points
+
+        # The state history covers every time step, starting at time step 0, so it uses
+        # its own time array rather than the results-averaging window above.
+        num_state_steps = len(operating_points)
+        state_times = np.linspace(
+            0.0,
+            delta_time * (num_state_steps - 1),
+            num_state_steps,
+            endpoint=True,
+        )
+
+        # Initialize matrices to hold the state quantities at every time step.
+        positions_E_Eo = np.zeros((3, num_state_steps), dtype=float)
+        velocities_E__E = np.zeros((3, num_state_steps), dtype=float)
+        anglesDeg_E_to_BP1_izyx = np.zeros((3, num_state_steps), dtype=float)
+        omegasDeg_BP1__E = np.zeros((3, num_state_steps), dtype=float)
+        alphas = np.zeros(num_state_steps, dtype=float)
+        betas = np.zeros(num_state_steps, dtype=float)
+
+        # Iterate through the time steps and extract each step's state.
+        for step, this_operating_point in enumerate(operating_points):
+            positions_E_Eo[:, step] = this_operating_point.CgP1_E_Eo
+            velocities_E__E[:, step] = _velocity_E__E_from_operating_point(
+                this_operating_point
+            )
+            anglesDeg_E_to_BP1_izyx[:, step] = this_operating_point.angles_E_to_BP1_izyx
+            omegasDeg_BP1__E[:, step] = this_operating_point.omegas_BP1__E
+            alphas[step] = this_operating_point.alpha
+            betas[step] = this_operating_point.beta
+
+        # The state describes the first Airplane (the rigid body MuJoCo integrates), so
+        # the plot titles and file names use the first Airplane's name.
+        airplane_name = unsteady_solver.steady_problems[0].airplanes[0].name
+        airplane_name_snake = airplane_name.lower().replace(" ", "_")
+
+        _plot_state_history(
+            state_times,
+            [positions_E_Eo[0], positions_E_Eo[1], positions_E_Eo[2]],
+            ["X Component", "Y Component", "Z Component"],
+            [_linear_x_color, _linear_y_color, _linear_z_color],
+            airplane_name + " Position",
+            "(of the First Airplane's CG, in Earth Axes, Relative to the "
+            "Earth Origin)",
+            "Position (m)",
+            save,
+            airplane_name_snake + "_position.png",
+        )
+        _plot_state_history(
+            state_times,
+            [velocities_E__E[0], velocities_E__E[1], velocities_E__E[2]],
+            ["X Component", "Y Component", "Z Component"],
+            [_linear_x_color, _linear_y_color, _linear_z_color],
+            airplane_name + " Velocity",
+            "(of the First Airplane's CG, in Earth Axes, Observed from the "
+            "Earth Frame)",
+            "Velocity (m/s)",
+            save,
+            airplane_name_snake + "_velocity.png",
+        )
+        _plot_state_history(
+            state_times,
+            [
+                anglesDeg_E_to_BP1_izyx[0],
+                anglesDeg_E_to_BP1_izyx[1],
+                anglesDeg_E_to_BP1_izyx[2],
+            ],
+            ["Roll Angle", "Pitch Angle", "Yaw Angle"],
+            [_angular_x_color, _angular_y_color, _angular_z_color],
+            airplane_name + " Orientation",
+            "(of the First Airplane's Body Axes Relative to Earth Axes "
+            "Using an Intrinsic zy'x\" Sequence)",
+            "Orientation (deg)",
+            save,
+            airplane_name_snake + "_orientation.png",
+        )
+        _plot_state_history(
+            state_times,
+            [omegasDeg_BP1__E[0], omegasDeg_BP1__E[1], omegasDeg_BP1__E[2]],
+            ["Roll Rate", "Pitch Rate", "Yaw Rate"],
+            [_angular_x_color, _angular_y_color, _angular_z_color],
+            airplane_name + " Angular Velocity",
+            "(in the First Airplane's Body Axes, Observed from the " "Earth Frame)",
+            "Angular Velocity (deg/s)",
+            save,
+            airplane_name_snake + "_angular_velocity.png",
+        )
+        _plot_state_history(
+            state_times,
+            [alphas, betas],
+            ["Angle of Attack", "Sideslip Angle"],
+            [_alpha_color, _beta_color],
+            airplane_name + " Aerodynamic Angles",
+            "",
+            "Angle (deg)",
+            save,
+            airplane_name_snake + "_aerodynamic_angles.png",
+        )
 
     # If the user wants to show the plots, do so. This is done outside the loop so
     # that plt.show() is only called once after all figures are created.
@@ -1216,7 +1681,19 @@ def log_results(
     The logging level must be set to INFO or lower in order to see results. See
     set_up_logging for details on configuring the logging level.
 
-    :param solver: The solver whose load and load coefficients will be logged.
+    For a FreeFlightUnsteadyRingVortexLatticeMethodSolver, this also logs the first
+    Airplane's initial and final six-degree-of-freedom state: its position, velocity,
+    orientation, angular velocity, and aerodynamic angles.
+
+    :param solver: The solver whose load and load coefficients will be logged. This can
+        be a SteadyHorseshoeVortexLatticeMethodSolver, a
+        SteadyRingVortexLatticeMethodSolver, or an
+        UnsteadyRingVortexLatticeMethodSolver. The
+        UnsteadyRingVortexLatticeMethodSolver's subclasses, the
+        AeroelasticUnsteadyRingVortexLatticeMethodSolver and the
+        FreeFlightUnsteadyRingVortexLatticeMethodSolver, are also accepted. For a
+        FreeFlightUnsteadyRingVortexLatticeMethodSolver, the first Airplane's initial
+        and final state is logged as well.
     :return: None
     """
     if isinstance(
@@ -1239,8 +1716,8 @@ def log_results(
             solver_type = "variable geometry unsteady"
     else:
         raise TypeError(
-            "solver must be a SteadyHorseshoeVortexLatticeMethodSolver, "
-            "a SteadyRingVortexLatticeMethodSolver, or an "
+            "solver must be a SteadyHorseshoeVortexLatticeMethodSolver, a "
+            "SteadyRingVortexLatticeMethodSolver, or an "
             "UnsteadyRingVortexLatticeMethodSolver."
         )
 
@@ -1250,18 +1727,18 @@ def log_results(
     padding_spaces = 2
 
     col1 = [
-        "FX_W",
-        "FY_W",
-        "FZ_W",
-        "MX_W_Cg",
-        "MY_W_Cg",
-        "MZ_W_Cg",
+        "fX_W",
+        "fY_W",
+        "fZ_W",
+        "mX_W_CgP1",
+        "mY_W_CgP1",
+        "mZ_W_CgP1",
         "cFX_W",
         "cFY_W",
         "cFZ_W",
-        "cMX_W_Cg",
-        "cMY_W_Cg",
-        "cMZ_W_Cg",
+        "cMX_W_CgP1",
+        "cMY_W_CgP1",
+        "cMZ_W_CgP1",
     ]
     col1 = [label + ":" for label in col1]
     col1_space = max(len(elem) for elem in col1) + padding_spaces
@@ -1283,8 +1760,6 @@ def log_results(
     col3 = [label + ":" for label in col3]
     col3_space = max(len(elem) for elem in col3) + padding_spaces
 
-    pad = " " * padding_spaces
-
     for airplane_num, airplane in enumerate(these_airplanes):
         title1: str = ""
         title2: str = ""
@@ -1297,10 +1772,17 @@ def log_results(
 
         match solver_type:
             case "steady":
-                title1 = f"{pad}Forces (in wind axes):"
-                title2 = f"{pad}Moments (in wind axes, relative to the CG):"
-                title3 = f"{pad}Force Coefficients (in wind axes):"
-                title4 = f"{pad}Moment Coefficients (in wind axes, relative to the CG):"
+                title1 = _logging.indent(1) + "Forces (in Wind Axes):"
+                title2 = (
+                    _logging.indent(1)
+                    + "Moments (in Wind Axes, Relative to the First Airplane's CG):"
+                )
+                title3 = _logging.indent(1) + "Force Coefficients (in Wind Axes):"
+                title4 = (
+                    _logging.indent(1)
+                    + "Moment Coefficients (in Wind Axes, Relative to the First "
+                    "Airplane's CG):"
+                )
 
                 _forces_W = airplane.forces_W
                 assert _forces_W is not None
@@ -1328,12 +1810,17 @@ def log_results(
                     unsteady_ring_vortex_lattice_method.UnsteadyRingVortexLatticeMethodSolver,
                 )
 
-                title1 = f"{pad}Final Forces (in wind axes):"
-                title2 = f"{pad}Final Moments (in wind axes, relative to the CG):"
-                title3 = f"{pad}Final Force Coefficients (in wind axes):"
+                title1 = _logging.indent(1) + "Final Forces (in Wind Axes):"
+                title2 = (
+                    _logging.indent(1)
+                    + "Final Moments (in Wind Axes, Relative to the First "
+                    "Airplane's CG):"
+                )
+                title3 = _logging.indent(1) + "Final Force Coefficients (in Wind Axes):"
                 title4 = (
-                    f"{pad}Final Moment Coefficients (in wind axes, relative to "
-                    f"the CG):"
+                    _logging.indent(1)
+                    + "Final Moment Coefficients (in Wind Axes, Relative to "
+                    "the First Airplane's CG):"
                 )
                 these_forces_W = solver.unsteady_problem.finalForces_W[airplane_num]
                 these_moments_W_CgP1 = solver.unsteady_problem.finalMoments_W_CgP1[
@@ -1351,15 +1838,22 @@ def log_results(
                     unsteady_ring_vortex_lattice_method.UnsteadyRingVortexLatticeMethodSolver,
                 )
 
-                title1 = f"{pad}Final Cycle-Averaged Forces (in wind axes):"
-                title2 = (
-                    f"{pad}Final Cycle-Averaged Moments (in wind axes, relative "
-                    f"to the CG):"
+                title1 = (
+                    _logging.indent(1) + "Final Cycle-Averaged Forces (in Wind Axes):"
                 )
-                title3 = f"{pad}Final Cycle-Averaged Force Coefficients (in wind axes):"
+                title2 = (
+                    _logging.indent(1)
+                    + "Final Cycle-Averaged Moments (in Wind Axes, Relative to the "
+                    "First Airplane's CG):"
+                )
+                title3 = (
+                    _logging.indent(1)
+                    + "Final Cycle-Averaged Force Coefficients (in Wind Axes):"
+                )
                 title4 = (
-                    f"{pad}Final Cycle-Averaged Moment Coefficients (in wind "
-                    f"axes, relative to the CG):"
+                    _logging.indent(1)
+                    + "Final Cycle-Averaged Moment Coefficients (in Wind Axes, "
+                    "Relative to the First Airplane's CG):"
                 )
                 these_forces_W = solver.unsteady_problem.finalMeanForces_W[airplane_num]
                 these_moments_W_CgP1 = solver.unsteady_problem.finalMeanMoments_W_CgP1[
@@ -1390,7 +1884,7 @@ def log_results(
             these_momentCoefficients_W_CgP1[1],
             these_momentCoefficients_W_CgP1[2],
         ]
-        col2 = [str(np.round(val, 3)) for val in col2]
+        col2 = [f"{val:#10.3G}" for val in col2]
         col2 = [
             val + " N" if i < 3 else val + " Nm" if i < 6 else val
             for i, val in enumerate(col2)
@@ -1411,13 +1905,13 @@ def log_results(
             these_momentCoefficients_W_CgP1[1],
             these_momentCoefficients_W_CgP1[2],
         ]
-        col4 = [str(np.round(val, 3)) for val in col4]
+        col4 = [f"{val:#10.3G}" for val in col4]
         col4 = [
             val + " N" if i < 3 else val + " Nm" if i < 6 else val
             for i, val in enumerate(col4)
         ]
 
-        _logger.info(f'Airplane "{airplane.name}":')
+        _logger.info(_logging.indent() + f'Airplane "{airplane.name}":')
 
         # Display the Reynolds number for steady solvers.
         if solver_type == "steady":
@@ -1429,7 +1923,7 @@ def log_results(
                 ),
             )
             re = solver.reynolds_numbers[airplane_num]
-            _logger.info(f"{pad}Reynolds Number: {re:.2e}")
+            _logger.info(_logging.indent(1) + f"Reynolds Number: {re:#.3G}")
 
         for i in range(len(col1)):
             if i == 0:
@@ -1441,13 +1935,255 @@ def log_results(
             elif i == 9:
                 _logger.info(title4)
 
-            s = f"{2 * pad}{col1[i]:<{col1_space}}{col2[i]:<{col2_space}}{col3[i]:<{col3_space}}{col4[i]}"
+            s = (
+                _logging.indent(2)
+                + f"{col1[i]:<{col1_space}}{col2[i]:<{col2_space}}{col3[i]:<{col3_space}}{col4[i]}"
+            )
             _logger.info(s)
 
-        # If the results from more Airplanes are going to be logged, log a blank
-        # line to separate them.
-        if (airplane_num + 1) < solver.num_airplanes:
-            _logger.info("")
+    # For a free flight solver, also log the first Airplane's initial and final
+    # six-degree-of-freedom state. This is logged once, since the state describes the
+    # first Airplane, the single rigid body the dynamics integrate.
+    if isinstance(
+        solver,
+        free_flight_unsteady_ring_vortex_lattice_method.FreeFlightUnsteadyRingVortexLatticeMethodSolver,
+    ):
+        # Narrow the movement to a FreeFlightMovement so its operating point history is
+        # typed. The solver type guarantees this, so the assert documents the invariant.
+        movement = solver.unsteady_problem.movement
+        assert isinstance(movement, free_flight_movement_mod.FreeFlightMovement)
+        operating_points = movement.operating_point_movement.operating_points
+
+        final_time = solver.delta_time * (len(operating_points) - 1)
+
+        _logger.info(
+            _logging.indent() + "The First Airplane's Free Flight State History:"
+        )
+
+        # Each vector state quantity is broken into one row per component, mirroring
+        # the per-component force and moment rows above, and each component row is
+        # labeled with its variable-convention name. The four group headers are logged
+        # before their first component (at flat indices 0, 3, 6, and 9), and the
+        # component labels are padded to a common width so the values align.
+        state_component_labels = [
+            "cgP1X_E_Eo",
+            "cgP1Y_E_Eo",
+            "cgP1Z_E_Eo",
+            "angleX_E_to_BP1_izyx",
+            "angleY_E_to_BP1_izyx",
+            "angleZ_E_to_BP1_izyx",
+            "vCgP1X_E__E",
+            "vCgP1Y_E__E",
+            "vCgP1Z_E__E",
+            "omegaX_BP1__E",
+            "omegaY_BP1__E",
+            "omegaZ_BP1__E",
+        ]
+        state_component_labels = [label + ":" for label in state_component_labels]
+        state_component_units = ["m"] * 3 + ["deg"] * 3 + ["m/s"] * 3 + ["deg/s"] * 3
+        state_component_space = (
+            max(len(label) for label in state_component_labels) + 2 * padding_spaces
+        )
+
+        state_group_header_position = (
+            _logging.indent(2)
+            + "Position (of the First Airplane's CG, in Earth Axes, Relative "
+            "to the Earth Origin):"
+        )
+        state_group_header_orientation = (
+            _logging.indent(2)
+            + "Orientation (of the First Airplane's Body Axes Relative to "
+            "Earth Axes, Intrinsic zy'x\" Sequence):"
+        )
+        state_group_header_velocity = (
+            _logging.indent(2)
+            + "Velocity (of the First Airplane's CG, in Earth Axes, Observed "
+            "from the Earth Frame):"
+        )
+        state_group_header_angular_velocity = (
+            _logging.indent(2)
+            + "Angular Velocity (in the First Airplane's Body Axes, Observed "
+            "from the Earth Frame):"
+        )
+
+        # Log the initial state (at time step 0) and the final state.
+        for state_label, state_time, this_operating_point in [
+            ("Initial State", 0.0, operating_points[0]),
+            ("Final State", final_time, operating_points[-1]),
+        ]:
+            CgP1_E_Eo = this_operating_point.CgP1_E_Eo
+            angles_E_to_BP1_izyx = this_operating_point.angles_E_to_BP1_izyx
+            velocity_E__E = _velocity_E__E_from_operating_point(this_operating_point)
+            omegas_BP1__E = this_operating_point.omegas_BP1__E
+
+            state_component_values = [
+                CgP1_E_Eo[0],
+                CgP1_E_Eo[1],
+                CgP1_E_Eo[2],
+                angles_E_to_BP1_izyx[0],
+                angles_E_to_BP1_izyx[1],
+                angles_E_to_BP1_izyx[2],
+                velocity_E__E[0],
+                velocity_E__E[1],
+                velocity_E__E[2],
+                omegas_BP1__E[0],
+                omegas_BP1__E[1],
+                omegas_BP1__E[2],
+            ]
+            state_component_values = [
+                f"{value:#10.3G} {unit}"
+                for value, unit in zip(state_component_values, state_component_units)
+            ]
+
+            _logger.info(
+                _logging.indent(1) + f"{state_label} (at t = {state_time:#.3G} s):"
+            )
+
+            for i in range(len(state_component_labels)):
+                if i == 0:
+                    _logger.info(state_group_header_position)
+                elif i == 3:
+                    _logger.info(state_group_header_orientation)
+                elif i == 6:
+                    _logger.info(state_group_header_velocity)
+                elif i == 9:
+                    _logger.info(state_group_header_angular_velocity)
+
+                _logger.info(
+                    _logging.indent(3)
+                    + f"{state_component_labels[i]:<{state_component_space}}"
+                    f"{state_component_values[i]}"
+                )
+
+            # The aerodynamic angles are scalars, so each is logged as a single row
+            # labeled with its variable-convention name. The labels are padded to a
+            # common width so the two values align with each other.
+            alpha_label = "Angle of Attack (alpha):"
+            beta_label = "Sideslip Angle (beta):"
+            aerodynamic_angle_space = (
+                max(len(alpha_label), len(beta_label)) + padding_spaces
+            )
+            _logger.info(
+                _logging.indent(2) + f"{alpha_label:<{aerodynamic_angle_space}}"
+                f"{this_operating_point.alpha:#10.3G} deg"
+            )
+            _logger.info(
+                _logging.indent(2) + f"{beta_label:<{aerodynamic_angle_space}}"
+                f"{this_operating_point.beta:#10.3G} deg"
+            )
+
+
+def _velocity_E__E_from_operating_point(
+    this_operating_point: operating_point_mod.OperatingPoint,
+) -> np.ndarray:
+    """Returns the first Airplane's CG velocity (in Earth axes, observed from the Earth
+    frame) for a free flight OperatingPoint.
+
+    The CG velocity is the negative of the freestream velocity, since the freestream (a
+    still airmass) is entirely due to the first Airplane's motion. The OperatingPoint
+    stores the freestream velocity in the first Airplane's geometry axes, so it is
+    rotated into Earth axes here.
+
+    :param this_operating_point: The OperatingPoint whose CG velocity will be returned.
+    :return: A (3,) ndarray of floats representing the first Airplane's CG velocity (in
+        Earth axes, observed from the Earth frame) in meters per second.
+    """
+    vInf_E__E = _transformations.apply_T_to_vectors(
+        this_operating_point.T_pas_GP1_CgP1_to_E_CgP1,
+        this_operating_point.vInf_GP1__E,
+        is_position=False,
+    )
+    return -vInf_E__E
+
+
+def _plot_state_history(
+    times: np.ndarray,
+    series: list[np.ndarray],
+    labels: list[str],
+    colors: list[str],
+    title: str,
+    subtitle: str,
+    y_label: str,
+    save: bool,
+    save_name: str,
+) -> None:
+    """Plots one free flight state-history figure: a set of series sharing a y-axis,
+    plotted against time and styled to match the load plots of plot_results_versus_time.
+
+    :param times: A (num_steps,) ndarray of floats representing the time, in seconds, at
+        each time step.
+    :param series: A list of (num_steps,) ndarrays of floats, one per line to plot.
+    :param labels: A list of the legend labels, one per series.
+    :param colors: A list of the line colors, one per series.
+    :param title: The figure's title.
+    :param subtitle: A smaller line below the title describing the axes, points, and
+        frames of the plotted quantity. Pass an empty string to omit.
+    :param y_label: The figure's y-axis label.
+    :param save: Set this to True to save the figure as a PNG.
+    :param save_name: The file name to save the figure under if save is True.
+    :return: None
+    """
+    figure, axes = plt.subplots()
+
+    # Remove the plot's top and right spines.
+    axes.spines.right.set_visible(False)
+    axes.spines.top.set_visible(False)
+
+    # Format the plot's spine and label colors.
+    axes.spines.bottom.set_color(_text_color_normalized)
+    axes.spines.left.set_color(_text_color_normalized)
+    axes.xaxis.label.set_color(_text_color_normalized)
+    axes.yaxis.label.set_color(_text_color_normalized)
+
+    # Format the plot's tick colors.
+    axes.tick_params(axis="x", colors=_text_color_normalized)
+    axes.tick_params(axis="y", colors=_text_color_normalized)
+
+    # Format the plot's background colors.
+    figure.patch.set_facecolor(_figure_background_color)
+    axes.set_facecolor(_figure_background_color)
+
+    # Populate the plot. Lines are drawn from thickest to thinnest so that all
+    # remain visible even when the curves overlap.
+    num_series = len(series)
+    widths = np.linspace(_max_line_width, _min_line_width, num_series)
+    for series_id, (this_series, label, color) in enumerate(
+        zip(series, labels, colors)
+    ):
+        axes.plot(
+            times,
+            this_series,
+            label=label,
+            color=color,
+            linewidth=widths[series_id],
+            solid_capstyle="butt",
+        )
+
+    # Name the plot's axis labels, title, and subtitle.
+    axes.set_xlabel("Time (s)", color=_text_color_normalized)
+    axes.set_ylabel(y_label, color=_text_color_normalized)
+    figure.suptitle(title, color=_text_color_normalized)
+    if subtitle:
+        axes.set_title(subtitle, color=_text_color_normalized, fontsize="small")
+
+    # Format the plot's legend.
+    axes.legend(
+        facecolor=_figure_background_color,
+        edgecolor=_figure_background_color,
+        labelcolor=_text_color_normalized,
+        handler_map={
+            plt.Line2D: matplotlib.legend_handler.HandlerLine2D(
+                update_func=lambda h, orig: (
+                    h.update_from(orig),
+                    h.set_linewidth(_legend_line_width),
+                )
+            )
+        },
+    )
+
+    # Save the figure as a PNG if the user wants to do so.
+    if save:
+        figure.savefig(save_name, dpi=300)
 
 
 def _get_panel_surfaces(
@@ -1584,6 +2320,61 @@ def _get_image_surface_mesh_and_texture(
     return mesh, texture
 
 
+def _get_T_pas_GP1_CgP1_to_E_Eo(
+    this_operating_point: operating_point_mod.OperatingPoint,
+) -> np.ndarray:
+    """Returns the passive transformation from the first Airplane's geometry axes,
+    relative to the first Airplane's CG, to Earth axes, relative to the Earth origin.
+
+    Free flight visualizations render each time step's geometry in its true Earth-frame
+    position and orientation, so the body translates and rotates through the scene. This
+    transformation chains the per-step geometry-to-Earth rotation with the translation
+    from the first Airplane's CG to the Earth origin.
+
+    :param this_operating_point: The OperatingPoint whose Earth-frame position and
+        orientation define the transformation.
+    :return: A (4,4) ndarray of floats representing the passive transformation from the
+        first Airplane's geometry axes, relative to the first Airplane's CG, to Earth
+        axes, relative to the Earth origin.
+    """
+    # Translate from Earth axes relative to the first Airplane's CG to Earth axes
+    # relative to the Earth origin. For a passive translation, the parameter is the
+    # position of the final reference point (the Earth origin) relative to the initial
+    # one (the first Airplane's CG), which is the negative of the CG's position relative
+    # to the Earth origin.
+    T_pas_E_CgP1_to_E_Eo = _transformations.generate_trans_T(
+        translations=-this_operating_point.CgP1_E_Eo,
+        passive=True,
+    )
+
+    # Chain geometry-to-Earth (relative to the CG) with the CG-to-origin translation.
+    return _transformations.compose_T_pas(
+        this_operating_point.T_pas_GP1_CgP1_to_E_CgP1,
+        T_pas_E_CgP1_to_E_Eo,
+    )
+
+
+def _transform_mesh(
+    mesh: pv.PolyData,
+    T_pas: np.ndarray,
+) -> pv.PolyData:
+    """Returns a copy of a PolyData mesh with its points mapped through a passive
+    transformation.
+
+    :param mesh: The PolyData mesh to transform.
+    :param T_pas: A (4,4) ndarray of floats representing the passive transformation to
+        apply to the mesh's points.
+    :return: A new PolyData mesh with all points mapped through the transformation.
+    """
+    transformed = mesh.copy()
+    transformed.points = _transformations.apply_T_to_vectors(
+        T_pas,
+        mesh.points,
+        is_position=True,
+    )
+    return transformed
+
+
 def _reflect_mesh(
     mesh: pv.PolyData,
     T_reflect: np.ndarray,
@@ -1597,13 +2388,67 @@ def _reflect_mesh(
         first Airplane's CG).
     :return: A new PolyData mesh with all points reflected across the image surface.
     """
-    reflected = mesh.copy()
-    reflected.points = _transformations.apply_T_to_vectors(
-        T_reflect,
-        mesh.points,
-        has_point=True,
-    )
-    return reflected
+    return _transform_mesh(mesh, T_reflect)
+
+
+def _free_flight_fit_parallel_scale(
+    meshes: list[pv.PolyData],
+    focalPoint_E_Eo: np.ndarray,
+    viewDirection_E: np.ndarray,
+    viewUp_E: np.ndarray,
+    margin: float = 1.15,
+) -> float:
+    """Returns a parallel-projection scale that frames a set of meshes about a focal
+    point.
+
+    The scale is half the viewport's height in world units (the convention for a
+    parallel projection). It is sized to the largest projection of the meshes' bounding-
+    box corners onto the camera's screen-right and screen-up axes, measured from the
+    focal point, so everything stays in view regardless of the viewport's aspect ratio.
+    A margin leaves a little space around the geometry.
+
+    :param meshes: The PolyData meshes to frame.
+    :param focalPoint_E_Eo: A (3,) ndarray of floats locating the camera's focal point
+        (in Earth axes, relative to the Earth origin). Extents are measured from this
+        point, since it projects to the center of the viewport.
+    :param viewDirection_E: A (3,) ndarray of floats giving the offset from the focal
+        point to the camera position (in Earth axes). The camera looks back along it.
+    :param viewUp_E: A (3,) ndarray of floats giving the camera's up direction (in Earth
+        axes).
+    :param margin: A factor (at least 1.0) by which to pad the fitted scale. The default
+        is 1.15.
+    :return: The parallel-projection scale.
+    """
+    # Build the camera's screen right and up axes in Earth axes. The camera looks from its
+    # position back toward the focal point, i.e. along the negative view direction. The up
+    # axis is the supplied up made orthogonal to that look direction.
+    lookDirection_E = -viewDirection_E
+    lookDirection_E = lookDirection_E / np.linalg.norm(lookDirection_E)
+    upDirection_E = viewUp_E - np.dot(viewUp_E, lookDirection_E) * lookDirection_E
+    upDirection_E = upDirection_E / np.linalg.norm(upDirection_E)
+    rightDirection_E = np.cross(lookDirection_E, upDirection_E)
+    rightDirection_E = rightDirection_E / np.linalg.norm(rightDirection_E)
+
+    # Collect every mesh's eight bounding-box corners, measured from the focal point.
+    corners_E_Eo: list[list[float]] = []
+    for mesh in meshes:
+        bounds = np.array(mesh.bounds, dtype=float)
+        corners_E_Eo.extend(
+            [float(x), float(y), float(z)]
+            for x in bounds[0:2]
+            for y in bounds[2:4]
+            for z in bounds[4:6]
+        )
+    corners_E = np.array(corners_E_Eo) - focalPoint_E_Eo
+
+    # Each matrix-vector product is a batch of dot products, one per corner: the (N, 3)
+    # array of corners times a (3,) screen axis gives an (N,) array whose entries are each
+    # corner's signed distance from the focal point along that axis (the axes are unit
+    # vectors, so the dot product is the scalar projection). Take the largest magnitude
+    # along either axis so neither screen dimension is clipped.
+    half_extent_right = float(np.abs(corners_E @ rightDirection_E).max())
+    half_extent_up = float(np.abs(corners_E @ upDirection_E).max())
+    return margin * max(half_extent_right, half_extent_up)
 
 
 def _mute_color(
@@ -1649,12 +2494,12 @@ def _get_wake_ring_vortex_surfaces(
     step: int,
 ) -> pv.PolyData:
     """Returns the PolyData representation of the surfaces of an
-    UnsteadyRingVortexLatticeMethodSolver's wake RingVortices at a given time step.
+    UnsteadyRingVortexLatticeMethodSolver's wake ring vortices at a given time step.
 
-    :param solver: The UnsteadyRingVortexLatticeMethodSolver with the wake RingVortices
+    :param solver: The UnsteadyRingVortexLatticeMethodSolver with the wake ring vortices
         to process.
-    :param step: The time step at which to process the wake RingVortices.
-    :return: The PolyData representation of the wake RingVortices.
+    :param step: The time step at which to process the wake ring vortices.
+    :return: The PolyData representation of the wake ring vortices.
     """
     num_wake_ring_vortices = solver.list_num_wake_vortices[step]
     stackFrwrvp_GP1_CgP1 = solver.listStackFrwrvp_GP1_CgP1[step]
@@ -1662,7 +2507,7 @@ def _get_wake_ring_vortex_surfaces(
     stackBlwrvp_GP1_CgP1 = solver.listStackBlwrvp_GP1_CgP1[step]
     stackBrwrvp_GP1_CgP1 = solver.listStackBrwrvp_GP1_CgP1[step]
 
-    # Initialize empty ndarrays to hold each wake RingVortex's vertices and face.
+    # Initialize empty ndarrays to hold each wake ring vortex's vertices and face.
     wake_ring_vortex_vertices = np.zeros((0, 3), dtype=float)
     wake_ring_vortex_faces = np.zeros(0, dtype=int)
 
@@ -1691,8 +2536,8 @@ def _get_wake_ring_vortex_surfaces(
             dtype=int,
         )
 
-        # Stack this wake RingVortex's vertices and faces to the ndarrays of all wake
-        # RingVortices' vertices and faces.
+        # Stack this wake ring vortex's vertices and faces to the ndarrays of all wake
+        # ring vortices' vertices and faces.
         wake_ring_vortex_vertices = np.vstack(
             (wake_ring_vortex_vertices, wake_ring_vortex_vertices_to_add)
         )
@@ -1700,10 +2545,7 @@ def _get_wake_ring_vortex_surfaces(
             (wake_ring_vortex_faces, wake_ring_vortex_face_to_add)
         )
 
-        # Increment the wake RingVortex counter.
-        wake_ring_vortex_num += 1
-
-    # Return the wake RingVortex surfaces.
+    # Return the wake ring vortex surfaces.
     return pv.PolyData(wake_ring_vortex_vertices, wake_ring_vortex_faces)
 
 
@@ -1772,6 +2614,7 @@ def _plot_scalars(
     c_min: float,
     c_max: float,
     panel_surfaces: pv.PolyData,
+    text_color: tuple[int, int, int] = _text_color,
 ) -> None:
     """Plots a scalar bar, the surfaces of a set of Panels with particular scalars, and
     labels for the minimum and maximum scalar values.
@@ -1788,6 +2631,8 @@ def _plot_scalars(
     :param c_min: Lower bound for the color map scaling.
     :param c_max: Upper bound for the color map scaling.
     :param panel_surfaces: PolyData representing the Panels' surfaces.
+    :param text_color: The color used for the scalar bar and label text. The default is
+        _text_color.
     :return: None
     """
     scalar_bar_args = dict(
@@ -1798,8 +2643,8 @@ def _plot_scalars(
         position_x=_bar_position_x,
         position_y=_bar_position_y,
         n_labels=_bar_n_labels,
-        fmt="%.2f",
-        color=_text_color,
+        fmt="%#.3G",
+        color=text_color,
     )
     plotter.add_mesh(
         panel_surfaces,
@@ -1810,17 +2655,18 @@ def _plot_scalars(
         smooth_shading=False,
         scalar_bar_args=scalar_bar_args,  # type: ignore[arg-type]
     )
+
     plotter.add_text(
-        text="Max: " + str(max_scalar),
+        text=f"Max: {max_scalar:#.3G}",
         position=_text_max_position,
         font_size=_text_font_size,
         viewport=True,
-        color=_text_color,
+        color=text_color,
     )
     plotter.add_text(
-        text="Min: " + str(min_scalar),
+        text=f"Min: {min_scalar:#.3G}",
         position=_text_min_position,
         font_size=_text_font_size,
         viewport=True,
-        color=_text_color,
+        color=text_color,
     )

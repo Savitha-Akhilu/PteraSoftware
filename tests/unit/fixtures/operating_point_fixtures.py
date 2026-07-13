@@ -16,6 +16,7 @@ def make_basic_operating_point_fixture():
         vCg__E=10.0,
         alpha=5.0,
         beta=0.0,
+        angles_E_to_BP1_izyx=(0.0, 0.0, 0.0),
         externalFX_W=0.0,
         nu=15.06e-6,
     )
@@ -422,6 +423,7 @@ def make_with_ground_surface_operating_point_fixture():
         vCg__E=10.0,
         alpha=5.0,
         beta=0.0,
+        angles_E_to_BP1_izyx=(0.0, 0.0, 0.0),
         CgP1_E_Eo=(0.0, 0.0, -10.0),
         surfaceNormal_E=(0.0, 0.0, -1.0),
         surfacePoint_E_Eo=(0.0, 0.0, 0.0),
@@ -456,3 +458,35 @@ def make_with_tilted_surface_operating_point_fixture():
     )
 
     return with_tilted_surface_operating_point_fixture
+
+
+def make_with_body_rates_operating_point_fixture():
+    """This method makes a fixture that is an OperatingPoint with a non zero
+    omegas_BP1__E for testing that non-free-flight solvers reject body rotation.
+
+    :return with_body_rates_operating_point_fixture: OperatingPoint
+        This is the OperatingPoint with a non zero angular velocity of the first
+        Airplane's body axes (observed from the Earth frame).
+    """
+    with_body_rates_operating_point_fixture = ps.operating_point.OperatingPoint(
+        omegas_BP1__E=(0.0, 0.0, 1.0),
+    )
+
+    return with_body_rates_operating_point_fixture
+
+
+def make_with_full_body_rates_operating_point_fixture():
+    """This method makes a fixture that is an OperatingPoint whose omegas_BP1__E has
+    three distinct non zero components, for testing that the free-flight solver's body
+    to geometry transformation negates the x and z components while preserving the y
+    component.
+
+    :return with_full_body_rates_operating_point_fixture: OperatingPoint
+        This is the OperatingPoint whose angular velocity of the first Airplane's body
+        axes (observed from the Earth frame) has three distinct non zero components.
+    """
+    with_full_body_rates_operating_point_fixture = ps.operating_point.OperatingPoint(
+        omegas_BP1__E=(1.0, 2.0, 3.0),
+    )
+
+    return with_full_body_rates_operating_point_fixture

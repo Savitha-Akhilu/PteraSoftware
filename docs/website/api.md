@@ -1,13 +1,18 @@
 # API Reference
 
-This reference covers the public modules most users interact with. Pages are generated automatically from docstrings using AutoAPI.
+This reference covers the public functions and modules most users interact with. Pages are generated automatically from docstrings using AutoAPI.
 
 ```{toctree}
 :maxdepth: 1
 
+save() <save>
+load() <load>
+set_up_logging() <set_up_logging>
 geometry <api/pterasoftware/geometry/index>
 movements <api/pterasoftware/movements/index>
+aeroelastic_unsteady_ring_vortex_lattice_method <api/pterasoftware/aeroelastic_unsteady_ring_vortex_lattice_method/index>
 convergence <api/pterasoftware/convergence/index>
+free_flight_unsteady_ring_vortex_lattice_method <api/pterasoftware/free_flight_unsteady_ring_vortex_lattice_method/index>
 operating_point <api/pterasoftware/operating_point/index>
 output <api/pterasoftware/output/index>
 problems <api/pterasoftware/problems/index>

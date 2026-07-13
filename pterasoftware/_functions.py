@@ -67,7 +67,6 @@ def log_unexpected_singularity_counts(
     )
 
 
-# TEST: Consider adding unit tests for this function.
 def cosspace(
     minimum: float, maximum: float, n_points: int = 50, endpoint: bool = True
 ) -> np.ndarray:
@@ -98,7 +97,6 @@ def cosspace(
     return mean + amp * np.cos(np.linspace(np.pi, 0, n_points, endpoint=endpoint))
 
 
-# TEST: Consider adding unit tests for this function.
 @njit(cache=True, fastmath=False)
 def numba_centroid_of_quadrilateral(
     frontLeftPoint_A_a: np.ndarray,
@@ -298,10 +296,10 @@ def process_solver_loads(
         theseMoments_GP1_CgP1 = stackPanelMoments_GP1_CgP1[panel_num, :]
 
         theseForces_W = _transformations.apply_T_to_vectors(
-            T_pas_GP1_CgP1_to_W_CgP1, theseForces_GP1, has_point=False
+            T_pas_GP1_CgP1_to_W_CgP1, theseForces_GP1, is_position=False
         )
         theseMoments_W_CgP1 = _transformations.apply_T_to_vectors(
-            T_pas_GP1_CgP1_to_W_CgP1, theseMoments_GP1_CgP1, has_point=True
+            T_pas_GP1_CgP1_to_W_CgP1, theseMoments_GP1_CgP1, is_position=False
         )
 
         # Update this Panel's loads.
@@ -327,12 +325,12 @@ def process_solver_loads(
         airplane.forces_W = _transformations.apply_T_to_vectors(
             T_pas_GP1_CgP1_to_W_CgP1,
             stackAirplaneForces_GP1[airplane_num],
-            has_point=False,
+            is_position=False,
         )
         airplane.moments_W_CgP1 = _transformations.apply_T_to_vectors(
             T_pas_GP1_CgP1_to_W_CgP1,
             stackAirplaneMoments_GP1_CgP1[airplane_num],
-            has_point=True,
+            is_position=False,
         )
 
     # Iterate through the Airplanes and calculate each one's load coefficients.
@@ -367,17 +365,37 @@ def update_ring_vortex_solvers_panel_attributes(
     ),
     global_panel_position: int,
     panel: _panel.Panel,
+    Frrvp_GP1_CgP1: np.ndarray,
+    Flrvp_GP1_CgP1: np.ndarray,
+    Blrvp_GP1_CgP1: np.ndarray,
+    Brrvp_GP1_CgP1: np.ndarray,
 ) -> None:
     """Populates a ring vortex solver's attributes with the attributes of a given Panel.
+
+    The four bound ring vortex corner points are passed in directly because, in general,
+    they cannot be derived from the Panel alone. The caller is expected to have already
+    resolved them (using neighboring Panels for non trailing edge Panels and a quarter
+    chord projection for trailing edge Panels).
 
     :param ring_vortex_solver: The solver whose attributes are to be updated.
     :param global_panel_position: The position of the Panel with respect to the global
         array of Panels.
     :param panel: The Panel whose attributes will be used to update the solver's
         attributes.
+    :param Frrvp_GP1_CgP1: A (3,) ndarray of floats representing the position of this
+        Panel's bound ring vortex's front right point (in the first Airplane's geometry
+        axes, relative to the first Airplane's CG). The units are in meters.
+    :param Flrvp_GP1_CgP1: A (3,) ndarray of floats representing the position of this
+        Panel's bound ring vortex's front left point (in the first Airplane's geometry
+        axes, relative to the first Airplane's CG). The units are in meters.
+    :param Blrvp_GP1_CgP1: A (3,) ndarray of floats representing the position of this
+        Panel's bound ring vortex's back left point (in the first Airplane's geometry
+        axes, relative to the first Airplane's CG). The units are in meters.
+    :param Brrvp_GP1_CgP1: A (3,) ndarray of floats representing the position of this
+        Panel's bound ring vortex's back right point (in the first Airplane's geometry
+        axes, relative to the first Airplane's CG). The units are in meters.
     :return: None
     """
-
     assert ring_vortex_solver.panels is not None
     ring_vortex_solver.panels[global_panel_position] = panel
     assert ring_vortex_solver.stackUnitNormals_GP1 is not None
@@ -389,58 +407,53 @@ def update_ring_vortex_solvers_panel_attributes(
     assert ring_vortex_solver.stackCpp_GP1_CgP1 is not None
     ring_vortex_solver.stackCpp_GP1_CgP1[global_panel_position, :] = panel.Cpp_GP1_CgP1
 
-    assert panel.ring_vortex is not None
-    ring_vortex = panel.ring_vortex
-
-    assert ring_vortex.right_leg is not None
-    right_leg = ring_vortex.right_leg
-    assert ring_vortex.front_leg is not None
-    front_leg = ring_vortex.front_leg
-    assert ring_vortex.left_leg is not None
-    left_leg = ring_vortex.left_leg
-    assert ring_vortex.back_leg is not None
-    back_leg = ring_vortex.back_leg
-
+    # Bound ring vortex corner points. The right leg goes from the back right corner to
+    # the front right corner, the front leg from front right to front left, the left
+    # leg from front left to back left, and the back leg from back left to back right.
     assert ring_vortex_solver.stackBrbrvp_GP1_CgP1 is not None
-    ring_vortex_solver.stackBrbrvp_GP1_CgP1[global_panel_position, :] = (
-        right_leg.Slvp_GP1_CgP1
-    )
+    ring_vortex_solver.stackBrbrvp_GP1_CgP1[global_panel_position, :] = Brrvp_GP1_CgP1
     assert ring_vortex_solver.stackFrbrvp_GP1_CgP1 is not None
-    ring_vortex_solver.stackFrbrvp_GP1_CgP1[global_panel_position, :] = (
-        right_leg.Elvp_GP1_CgP1
-    )
+    ring_vortex_solver.stackFrbrvp_GP1_CgP1[global_panel_position, :] = Frrvp_GP1_CgP1
     assert ring_vortex_solver.stackFlbrvp_GP1_CgP1 is not None
-    ring_vortex_solver.stackFlbrvp_GP1_CgP1[global_panel_position, :] = (
-        left_leg.Slvp_GP1_CgP1
-    )
+    ring_vortex_solver.stackFlbrvp_GP1_CgP1[global_panel_position, :] = Flrvp_GP1_CgP1
     assert ring_vortex_solver.stackBlbrvp_GP1_CgP1 is not None
-    ring_vortex_solver.stackBlbrvp_GP1_CgP1[global_panel_position, :] = (
-        left_leg.Elvp_GP1_CgP1
-    )
+    ring_vortex_solver.stackBlbrvp_GP1_CgP1[global_panel_position, :] = Blrvp_GP1_CgP1
+
+    # Bound line vortex leg center points and direction vectors, derived from the
+    # corner points.
     assert ring_vortex_solver.stackCblvpr_GP1_CgP1 is not None
-    ring_vortex_solver.stackCblvpr_GP1_CgP1[global_panel_position, :] = (
-        right_leg.Clvp_GP1_CgP1
+    ring_vortex_solver.stackCblvpr_GP1_CgP1[global_panel_position, :] = 0.5 * (
+        Brrvp_GP1_CgP1 + Frrvp_GP1_CgP1
     )
     assert ring_vortex_solver.stackRbrv_GP1 is not None
-    ring_vortex_solver.stackRbrv_GP1[global_panel_position, :] = right_leg.vector_GP1
+    ring_vortex_solver.stackRbrv_GP1[global_panel_position, :] = (
+        Frrvp_GP1_CgP1 - Brrvp_GP1_CgP1
+    )
     assert ring_vortex_solver.stackCblvpf_GP1_CgP1 is not None
-    ring_vortex_solver.stackCblvpf_GP1_CgP1[global_panel_position, :] = (
-        front_leg.Clvp_GP1_CgP1
+    ring_vortex_solver.stackCblvpf_GP1_CgP1[global_panel_position, :] = 0.5 * (
+        Frrvp_GP1_CgP1 + Flrvp_GP1_CgP1
     )
     assert ring_vortex_solver.stackFbrv_GP1 is not None
-    ring_vortex_solver.stackFbrv_GP1[global_panel_position, :] = front_leg.vector_GP1
+    ring_vortex_solver.stackFbrv_GP1[global_panel_position, :] = (
+        Flrvp_GP1_CgP1 - Frrvp_GP1_CgP1
+    )
     assert ring_vortex_solver.stackCblvpl_GP1_CgP1 is not None
-    ring_vortex_solver.stackCblvpl_GP1_CgP1[global_panel_position, :] = (
-        left_leg.Clvp_GP1_CgP1
+    ring_vortex_solver.stackCblvpl_GP1_CgP1[global_panel_position, :] = 0.5 * (
+        Flrvp_GP1_CgP1 + Blrvp_GP1_CgP1
     )
     assert ring_vortex_solver.stackLbrv_GP1 is not None
-    ring_vortex_solver.stackLbrv_GP1[global_panel_position, :] = left_leg.vector_GP1
+    ring_vortex_solver.stackLbrv_GP1[global_panel_position, :] = (
+        Blrvp_GP1_CgP1 - Flrvp_GP1_CgP1
+    )
     assert ring_vortex_solver.stackCblvpb_GP1_CgP1 is not None
-    ring_vortex_solver.stackCblvpb_GP1_CgP1[global_panel_position, :] = (
-        back_leg.Clvp_GP1_CgP1
+    ring_vortex_solver.stackCblvpb_GP1_CgP1[global_panel_position, :] = 0.5 * (
+        Blrvp_GP1_CgP1 + Brrvp_GP1_CgP1
     )
     assert ring_vortex_solver.stackBbrv_GP1 is not None
-    ring_vortex_solver.stackBbrv_GP1[global_panel_position, :] = back_leg.vector_GP1
+    ring_vortex_solver.stackBbrv_GP1[global_panel_position, :] = (
+        Brrvp_GP1_CgP1 - Blrvp_GP1_CgP1
+    )
+
     assert ring_vortex_solver.panel_is_trailing_edge is not None
     ring_vortex_solver.panel_is_trailing_edge[global_panel_position] = (
         panel.is_trailing_edge
@@ -495,7 +508,6 @@ def calculate_steady_freestream_wing_influences(
     )
 
 
-# TEST: Consider adding unit tests for this function.
 @njit(cache=True, fastmath=False)
 def numba_1d_explicit_cross(
     stackVectors1_A: np.ndarray, stackVectors2_A: np.ndarray
@@ -510,7 +522,7 @@ def numba_1d_explicit_cross(
     Adapted from:
     https://stackoverflow.com/a/66757029/13240504
 
-    Author: Jérôme Richard
+    Author: Jerome Richard
 
     Date of retrieval: 03/23/2021
 
@@ -539,7 +551,6 @@ def numba_1d_explicit_cross(
     return stackCrossProducts
 
 
-# TEST: Consider adding unit tests for this function.
 @njit(cache=True, fastmath=False)
 def interp_between_points(
     stackStartPoints_A_a: np.ndarray,
@@ -578,3 +589,68 @@ def interp_between_points(
             gridInterpolatedPoints_A_a[i, j, :] = startPoint_A_a + scaledVector_A
 
     return gridInterpolatedPoints_A_a
+
+
+# The width to which format_duration left-pads its results when requested: the length
+# of the widest possible form, "-999 hr, 59 min, and 1.23E-305 s", built from the
+# widest possible components (a negative sign, three-digit hours, and a seconds
+# portion whose three-significant-figure form needs a three-digit exponent, the widest
+# a float can produce).
+_DURATION_PAD_WIDTH: int = 32
+
+
+def format_duration(total_seconds: float, left_pad: bool = False) -> str:
+    """Formats a duration as an hours, minutes, and seconds string.
+
+    The seconds portion is always less than 60 and is formatted with three significant
+    figures. The hours and minutes portions are dropped if the duration's magnitude is
+    less than one minute, and the hours portion is dropped if the magnitude is less than
+    one hour (which also drops the comma before the "and"). A magnitude of at least 1000
+    hours is formatted as hours alone with three significant figures. A negative
+    duration is formatted as its magnitude with a negative sign on the largest unit. A
+    seconds remainder that rounds to 60 at three significant figures is carried into the
+    minutes place, and a resulting 60 minutes is carried into the hours place.
+
+    :param total_seconds: The duration to format. The units are in seconds.
+    :param left_pad: Determines whether the result is left-padded with spaces to a
+        constant width, so the durations on successive log lines align. The default is
+        False.
+    :return: The formatted duration.
+    """
+    seconds_per_minute = 60.0
+    seconds_per_hour = 3600.0
+    max_whole_hours = 1000
+
+    sign = "-" if total_seconds < 0.0 else ""
+    magnitude_seconds = abs(total_seconds)
+
+    if magnitude_seconds >= max_whole_hours * seconds_per_hour:
+        formatted_duration = sign + f"{magnitude_seconds / seconds_per_hour:#.3G} hr"
+    else:
+        num_hours = int(magnitude_seconds // seconds_per_hour)
+        num_minutes = int(magnitude_seconds % seconds_per_hour // seconds_per_minute)
+        seconds_str = f"{magnitude_seconds % seconds_per_minute:#.3G}"
+
+        # Carry a seconds remainder that rounds to 60 at three significant figures
+        # into the minutes place, and a resulting 60 minutes into the hours place.
+        if float(seconds_str) >= seconds_per_minute:
+            seconds_str = f"{0.0:#.3G}"
+            num_minutes += 1
+            if num_minutes == 60:
+                num_minutes = 0
+                num_hours += 1
+
+        if num_hours >= max_whole_hours:
+            formatted_duration = sign + f"{float(num_hours):#.3G} hr"
+        elif num_hours > 0:
+            formatted_duration = (
+                sign + f"{num_hours} hr, {num_minutes} min, and {seconds_str} s"
+            )
+        elif num_minutes > 0:
+            formatted_duration = sign + f"{num_minutes} min and {seconds_str} s"
+        else:
+            formatted_duration = sign + f"{seconds_str} s"
+
+    if left_pad:
+        return formatted_duration.rjust(_DURATION_PAD_WIDTH)
+    return formatted_duration
